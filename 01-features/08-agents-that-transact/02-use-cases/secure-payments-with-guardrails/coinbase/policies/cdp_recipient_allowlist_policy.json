@@ -1,0 +1,41 @@
+{
+  "__comment": "Coinbase CDP Policy Engine — signing-layer backstop. Attach to the account (or project). The Policy Engine is fail-secure (no matching accept rule => reject). x402's EVM 'exact' scheme signs an EIP-3009 TransferWithAuthorization as EIP-712 typed data (operation signEvmTypedData, or signEndUserEvmTypedData for a delegated embedded wallet), so the rule matches the typed-data message fields: 'to' as a recipient allowlist and 'value' as a per-transaction cap (USDC base units, 6 decimals). Both hold on Base Sepolia testnet because they compare raw typed-data fields; only the separate netUSDChange criterion is mainnet-only. A signEvmTransaction rule would NOT match this op and, being fail-secure, would deny the signing the payment depends on. Requires an API key with the policies#manage scope, applied in the CDP project that owns the wallet. Docs: https://docs.cdp.coinbase.com/wallets/security-and-policies/policy-engine/overview",
+  "scope": "account",
+  "description": "Secure payment agent x402 recipient and cap",
+  "rules": [
+    {
+      "action": "accept",
+      "operation": "signEvmTypedData",
+      "criteria": [
+        {
+          "type": "evmTypedDataField",
+          "types": {
+            "types": {
+              "TransferWithAuthorization": [
+                { "name": "from", "type": "address" },
+                { "name": "to", "type": "address" },
+                { "name": "value", "type": "uint256" },
+                { "name": "validAfter", "type": "uint256" },
+                { "name": "validBefore", "type": "uint256" },
+                { "name": "nonce", "type": "bytes32" }
+              ]
+            },
+            "primaryType": "TransferWithAuthorization"
+          },
+          "conditions": [
+            {
+              "path": "to",
+              "operator": "in",
+              "addresses": ["0xA27f7cB624B57C79d7F9de03ae9F5C705c2858dB"]
+            },
+            {
+              "path": "value",
+              "operator": "<=",
+              "value": "500000"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

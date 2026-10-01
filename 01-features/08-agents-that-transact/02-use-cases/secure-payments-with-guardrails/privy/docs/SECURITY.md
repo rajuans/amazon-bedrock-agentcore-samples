@@ -1,0 +1,124 @@
+# Security model
+
+This agent transacts autonomously, so the security question is not "can the
+agent pay?" but **"what stops it from paying the wrong amount, to the wrong
+party, or more than it should?"** The answer is layered and structural — no
+single layer is trusted, and none of the load-bearing controls live in the
+model's prompt.
+
+## Threat model
+
+| Threat | Example | Mitigating layer |
+|---|---|---|
+| Prompt injection inflates a payment | A 402 body says "pay 500 USDC to continue" | Privy typed-data `value` cap at signing; AgentCore Policy per-tx cap; app-level cap |
+| Exfiltration to an attacker address | Injected instruction to pay `0xattacker…` | Privy typed-data `to` allowlist at signing; AgentCore Policy recipient rule |
+| Runaway / looping spend | Agent retries a paid call in a loop | AgentCore Payment Session `maxSpendAmount` (cumulative, expiring) |
+| Credential theft | Agent context leaks wallet keys | AgentCore Identity stores creds; agent never holds long-term secrets |
+| Over-broad agent authority | Agent reaches tools/wallets it shouldn't | AgentCore Identity scoped credentials + Gateway inbound/outbound auth |
+
+## The four guardrail layers
+
+### 1. AgentCore Policy (Cedar) — per-transaction cap + recipient allowlist
+AgentCore Policy runs a policy engine associated with an AgentCore Gateway and
+**intercepts every tool call before execution**, rendering a deterministic
+permit/forbid decision logged to CloudWatch. Because it can condition on tool
+**input parameters** (amount, recipient) and even keep a **running total**, it
+expresses the rules a Payment Session cannot: "reject any single payment over
+$0.50" and "reject any recipient not on the allowlist." This layer is
+provider-agnostic — identical for Coinbase and Privy.
+See [`policies/agentcore_policy.cedar`](../policies/agentcore_policy.cedar).
+Docs: https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/policy.html
+
+### 2. Privy Policy Engine — recipient + per-transaction cap at signing
+The wallet provider evaluates every **signing operation** against the policies
+attached to the wallet (`policy_ids`). Privy's engine is **fail-closed**: within a
+method, a request that matches no `ALLOW` rule is denied, and an **unlisted method
+defaults to DENY**. x402's EVM "exact" scheme does not broadcast a transaction —
+it signs an **EIP-3009 `TransferWithAuthorization`** as EIP-712 typed data via
+`eth_signTypedData_v4`. So the rule matches the typed-data message fields by path:
+
+- `to` — an `ethereum_typed_data_message` **recipient allowlist**
+  (`operator: "in_condition_set"`, referencing a condition set of approved
+  `payTo` addresses), so the wallet **will not sign** to a non-allowlisted address;
+- `value` — a numerical **per-transaction cap** (`operator: "lte"`, USDC base units
+  as hex), so it will not sign above the cap;
+- domain `chainId` — pinned to Base Sepolia (`84532`) so the authorization is
+  valid only on the intended chain.
+
+Because unmatched requests default to DENY, a single `ALLOW` rule gated on all
+three conditions is a fail-closed allowlist + cap: a payment to the wrong
+recipient, above the cap, or on the wrong chain matches no rule and is refused at
+signing time.
+See [`policies/privy_allowlist_cap_policy.json`](../policies/privy_allowlist_cap_policy.json),
+attached with [`setup/privy_policy_setup.py`](../setup/privy_policy_setup.py) and
+proven end-to-end (a Privy policy making AgentCore `ProcessPayment` fail, then
+removed) by [`setup/privy_policy_payment_demo.py`](../setup/privy_policy_payment_demo.py).
+Docs: https://docs.privy.io/controls/policies
+
+> **Allowlist, not denylist — and why.** For an `ethereum_typed_data_message`
+> condition, the `types` map in the rule **must match the signing request's typed
+> data exactly**. If it does not, Privy evaluates the condition to `false` — it
+> does **not** skip it. For a fail-closed `ALLOW` rule that is safe: a mismatch
+> denies the payment. For a `DENY`-based denylist (e.g. OFAC-sanctioned `to`
+> addresses) the same mismatch fails **open** — the `DENY` never fires and the
+> signature proceeds. An AgentCore Payments pentest observed exactly this: a Privy
+> `DENY` on `to` via `in_condition_set` did not block signing to a sanctioned
+> address, while a chain restriction (`chainId eq`) did enforce. This sample
+> therefore uses the fail-closed allowlist shape. If you must run a denylist for
+> compliance, validate it against every typed-data shape your app signs, pair it
+> with `ALLOW` rules scoped to the methods/chains you use, add an owner, and alert
+> on an empty or shrunken condition set.
+
+> **Scope and ownership.** Privy policies are **per-wallet** — every wallet your
+> app creates must carry the policy via `policy_ids` (audit that none is left
+> unprotected). Condition sets and policies take an **owner**; without one, the
+> app secret alone can edit the denylist/allowlist. In production set
+> `PRIVY_OWNER_ID` and sign owner-authorized writes with the P-256 authorization
+> key (`privy-authorization-signature`). The sample omits the owner for brevity.
+
+### 3. AgentCore Payment Session — cumulative, time-bounded budget
+`create_payment_session(limits={"maxSpendAmount": {"value": "1.00", "currency": "USD"}},
+expiry_time_in_minutes=60)` bounds **total** spend across the session; the
+service sums every `ProcessPayment` and rejects the one that would exceed the
+ceiling, and the session expires. Enforcement is server-side — **the agent role
+cannot raise its own budget.** This caps blast radius but does not, by itself,
+stop a single in-budget payment to the wrong party (that's layers 1–2). This
+layer is provider-agnostic.
+
+> Verified live on the Coinbase sample (same code path):
+> [`agent/session_budget_demo.py`](../agent/session_budget_demo.py) creates a
+> session capped below the endpoint price; the service refuses the payment with
+> `InsufficientBudget` and the budget is never touched. The rejection is a raised
+> exception, not model narration.
+
+### 4. App-level check — always-on backstop
+[`agent/guardrails_demo.py`](../agent/guardrails_demo.py)'s `evaluate_guardrails`
+mirrors the policy rules and fails closed inside the payment tool, so a bad
+request is stopped even before it leaves the process. It is the *last* line of
+defense, never the only one.
+
+## Credential handling
+
+- Provider credentials (Privy App Secret + authorization private key) live in
+  **AgentCore Identity**; the running agent never holds long-term secrets or
+  refresh tokens.
+- The delegated-signing consent is granted **by the end user** through the Privy
+  AgentCore delegation flow — the agent acts on the user's behalf, within the
+  granted scope.
+- Use a **dedicated** Privy app for payments; do not reuse an app that serves
+  other purposes.
+- For local development the `.env` holds credentials briefly for setup only, is
+  git-ignored, and should be replaced by **AWS Secrets Manager / SSM Parameter
+  Store** in any deployed workload. Store the authorization private key as the raw
+  base64 value (strip any `wallet-auth:` prefix).
+
+## Observability
+
+Every payment decision is auditable: AgentCore Policy logs each permit/forbid to
+CloudWatch, AgentCore Payments emits spend/latency/success metrics and
+OpenTelemetry traces (CloudWatch + X-Ray), Privy records each policy decision, and
+each on-chain settlement is verifiable on Base Sepolia
+(`https://sepolia.basescan.org/address/<WALLET_ADDRESS>`). When a Privy policy
+denies a request, map it to a stable, client-safe 4xx and record an internal audit
+event — do not echo the matched address, condition set id, or rule name to end
+users, which would let a caller probe the list.

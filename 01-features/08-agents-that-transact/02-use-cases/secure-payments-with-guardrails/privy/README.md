@@ -1,0 +1,205 @@
+# Secure Payment Agent — Strands + AgentCore Payments + Stripe/Privy
+
+A sample **autonomous payment agent** that buys a paid (x402-gated) resource,
+paying in **USDC on Base Sepolia (testnet)** through **Amazon Bedrock AgentCore
+Payments** with **Stripe (Privy)** as the wallet provider — wrapped in
+**layered, policy-enforced spending guardrails**.
+
+This is the Privy counterpart to the Coinbase CDP sample. The agent, the budgeted
+session, the Cedar policy, and the app-level check are provider-agnostic; only the
+wallet-provider connector and the **signing-layer policy** differ.
+
+The agent never holds open-ended access to funds and cannot raise its own
+limits. Every control that matters is enforced by infrastructure (a policy
+engine, the wallet provider, and a budgeted session), not by the model's prompt.
+
+> **Testnet only.** Base Sepolia with free USDC from
+> [faucet.circle.com](https://faucet.circle.com/). Testnet USDC has no value.
+
+## How it works
+
+```
+Agent (Strands + http_request)
+  │  GET https://…/paid-api
+  ├─► 402 Payment Required
+  │        AgentCorePaymentsPlugin intercepts the 402
+  │        → session budget check → sign USDC tx via Privy → payment proof
+  │        → retry with X-PAYMENT header
+  ├─► 200 OK  (agent receives the paid content)
+  └─► Agent summarizes the result
+```
+
+The x402 "exact" scheme signs an **EIP-3009 `TransferWithAuthorization`** as
+EIP-712 typed data. On Privy that is an `eth_signTypedData_v4` operation, which is
+exactly what the Privy policy engine screens.
+
+## Layered guardrails (defense in depth)
+
+| Layer | Enforces | Where |
+|---|---|---|
+| **AgentCore Policy** (Cedar) | per-transaction amount cap + recipient allowlist, evaluated before execution | [`policies/agentcore_policy.cedar`](policies/agentcore_policy.cedar) |
+| **Privy Policy Engine** | recipient `to` allowlist **+** per-transaction `value` cap on the EIP-3009 typed data, fail-closed, at signing time | [`policies/privy_allowlist_cap_policy.json`](policies/privy_allowlist_cap_policy.json) |
+| **AgentCore Payment Session** | cumulative, time-bounded spend ceiling (`maxSpendAmount`) | created in [`setup/provision_payments.py`](setup/provision_payments.py) |
+| **App-level check** | always-on cap + allowlist backstop | [`agent/guardrails_demo.py`](agent/guardrails_demo.py) |
+
+> A Payment Session caps *cumulative* spend only. Rejecting a *single* high-value
+> payment, or a payment to a *specific* recipient, requires the policy layers
+> above — see [`docs/SECURITY.md`](docs/SECURITY.md).
+
+## Privy vs Coinbase CDP — what differs
+
+| | Coinbase CDP | Stripe / Privy |
+|---|---|---|
+| Connector vendor | `CoinbaseCDP` | `StripePrivy` |
+| Credentials | API Key ID/Secret + Wallet Secret | App ID + App Secret + Authorization ID + P-256 Private Key |
+| Signing op (x402) | `signEndUserEvmTypedData` | `eth_signTypedData_v4` |
+| Policy attach scope | project-scoped (end-user accounts) | **per-wallet** (`policy_ids`) |
+| Policy polarity | allow-rule allowlist (fail-secure) | **fail-closed**: unmatched/unlisted method ⇒ DENY |
+| Recipient rule | typed-data `to` `in` allowlist | typed-data `to` `in_condition_set` |
+| Per-tx cap | typed-data `value` `<=` | typed-data `value` `lte` |
+
+This sample implements the Privy lever as a **fail-closed ALLOW rule** (approved
+recipient + under cap + right chain), rather than an OFAC-style denylist. See
+[`docs/SECURITY.md`](docs/SECURITY.md) for why — a denylist on a typed-data field
+can fail *open* if its `types` schema doesn't match the request exactly, a gap an
+AgentCore Payments pentest found in a Privy `to` denylist.
+
+## Repository layout
+
+```
+.
+├── agent/
+│   ├── secure_payment_agent.py   # the autonomous x402 purchase (happy path)
+│   ├── guardrails_demo.py        # 3 scenarios: happy path, high amount, bad recipient
+│   ├── session_budget_demo.py    # live: session budget rejects an over-budget payment
+│   └── utils.py                  # env load/validate helpers
+├── setup/
+│   ├── provision_stack.py        # create IAM roles + Privy credential provider + manager + connector
+│   ├── provision_payments.py     # create per-user wallet + budgeted session
+│   ├── privy_policy_setup.py     # create condition set + policy (allowlist + cap + chain), attach to wallet
+│   ├── privy_policy_remove.py    # detach + delete the Privy policy (cleanup)
+│   └── privy_policy_payment_demo.py # live: a Privy policy makes AgentCore ProcessPayment fail
+├── policies/
+│   ├── agentcore_policy.cedar    # per-tx cap + recipient allowlist (Cedar)
+│   └── privy_allowlist_cap_policy.json
+├── docs/SECURITY.md              # threat model + the four guardrail layers
+├── .env.privy.sample             # copy to .env; never commit real secrets
+└── requirements.txt
+```
+
+## Prerequisites
+
+- An AWS account in a region where AgentCore Payments is available
+  (`us-east-1`, `us-west-2`, `eu-central-1`, `ap-southeast-2`), AWS CLI configured.
+- **Python 3.10+** and **Node.js 20+** (for the AgentCore CLI).
+- A **dedicated Privy app** ([dashboard.privy.io](https://dashboard.privy.io/)):
+  App ID, App Secret, and a P-256 authorization key pair (Authorization ID +
+  Private Key). Do not reuse an app that serves other purposes.
+- Amazon Bedrock model access for the agent's LLM.
+
+## Quick start
+
+```bash
+python3.12 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.privy.sample .env      # then fill in your values
+```
+
+**1 — Provision the shared payment stack** (IAM roles + Privy credential provider
++ PaymentManager + PaymentConnector). This raw-boto3 script mirrors the public
+awslabs sample's 4-role privilege separation and writes every resulting ARN/ID
+into `.env`:
+
+```bash
+python setup/provision_stack.py
+```
+
+<details><summary>Alternative: the AgentCore CLI</summary>
+
+```bash
+npm install -g @aws/agentcore
+agentcore create --name PaymentSetup --framework Strands --protocol HTTP \
+  --model-provider Bedrock --memory none
+cd PaymentSetup
+agentcore add payment-manager --name MyPaymentManager \
+  --auto-payment true --default-spend-limit 1.00
+agentcore add payment-connector --manager MyPaymentManager \
+  --name MyPrivyConnector --provider StripePrivy \
+  --app-id "$PRIVY_APP_ID" \
+  --app-secret "$PRIVY_APP_SECRET" \
+  --authorization-id "$PRIVY_AUTHORIZATION_ID" \
+  --authorization-private-key "$PRIVY_AUTHORIZATION_PRIVATE_KEY"
+agentcore validate && agentcore deploy -y
+agentcore status --type payment   # copy PAYMENT_MANAGER_ARN + PAYMENT_CONNECTOR_ID into ../.env
+```
+</details>
+
+**2 — Create the per-user wallet + budgeted session:**
+
+```bash
+python setup/provision_payments.py
+```
+
+**3 — Fund the wallet + grant delegated signing** (once): fund `WALLET_ADDRESS`
+at [faucet.circle.com](https://faucet.circle.com/) (Base Sepolia), then grant the
+agent delegated signing for the Privy embedded wallet via the delegation flow
+printed by setup (the Privy
+[AgentCore SDK frontend](https://github.com/privy-io/aws-agentcore-sdk)).
+
+**4 — (Recommended) the Privy signing-layer policy** (recipient allowlist +
+per-tx cap + chain pin, fail-closed at signing). Creates a Privy condition set of
+approved recipients and a policy, then attaches it to the wallet by `policy_ids`:
+
+```bash
+# Attach the policy to the wallet backing your instrument:
+python setup/privy_policy_setup.py
+
+# Prove it end-to-end: a Privy policy makes AgentCore ProcessPayment fail, then
+# the policy is removed (cleanup). (Run on a wallet with no policy attached.)
+python setup/privy_policy_payment_demo.py
+
+# Remove the policy after testing:
+python setup/privy_policy_remove.py
+```
+
+**5 — Run:**
+
+```bash
+python agent/secure_payment_agent.py   # autonomous purchase (happy path)
+python agent/guardrails_demo.py         # guardrail rejections (runs offline)
+python agent/session_budget_demo.py     # live: over-budget payment refused server-side
+```
+
+## Verification status
+
+- **Provider-agnostic layers** (budgeted session, Cedar policy, app-level check)
+  behave identically to the Coinbase sample, which was verified live on Base
+  Sepolia (`session_budget_demo.py` refuses an over-budget payment server-side
+  with `InsufficientBudget`).
+- **Privy signing-layer policy** (`privy_policy_setup.py` /
+  `privy_policy_payment_demo.py`) is built to Privy's documented policy API. Run
+  it against your own Privy app + AgentCore stack to confirm enforcement, and read
+  the schema-match caveat in [`docs/SECURITY.md`](docs/SECURITY.md) first — a
+  mismatched typed-data `types` map makes the condition evaluate to `false`.
+
+## Security notes
+
+- The `.env` pattern is for **local development only**. In deployed workloads,
+  source credentials from AWS Secrets Manager / SSM Parameter Store; AgentCore
+  Identity stores the provider credentials so the agent never sees long-term
+  secrets. See [`docs/SECURITY.md`](docs/SECURITY.md).
+- Never commit a real `.env` (it is git-ignored).
+
+## References (public)
+
+- AgentCore Payments — https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/payments-getting-started.html
+- AgentCore Policy — https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/policy.html
+- AWS samples — https://github.com/awslabs/agentcore-samples (`01-features/08-agents-that-transact`)
+- Privy policies — https://docs.privy.io/controls/policies
+- Privy AgentCore SDK — https://github.com/privy-io/aws-agentcore-sdk
+- x402 protocol — https://docs.cdp.coinbase.com/x402/welcome
+- Strands Agents — https://strandsagents.com/
+
+## License
+
+MIT-0. See [LICENSE](LICENSE).
