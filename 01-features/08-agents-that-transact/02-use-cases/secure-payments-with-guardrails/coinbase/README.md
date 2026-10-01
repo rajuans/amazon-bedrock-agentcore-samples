@@ -29,7 +29,7 @@ Agent (Strands + http_request)
 
 | Layer | Enforces | Where |
 |---|---|---|
-| **AgentCore Policy** (Cedar) | per-transaction amount cap + recipient allowlist, evaluated before execution | [`policies/agentcore_policy.cedar`](policies/agentcore_policy.cedar) |
+| **AgentCore Policy** (Cedar + Dogwood) | per-transaction amount cap + recipient allowlist, evaluated before execution; with Dogwood temporal policies, also recipient provenance, a velocity limit, and a rolling spend cap | [`policies/agentcore_policy.cedar`](policies/agentcore_policy.cedar), [`policies/dogwood/`](policies/dogwood/) |
 | **Coinbase CDP Policy Engine** | recipient `to` allowlist **+** per-transaction `value` cap on the EIP-3009 typed data, fail-secure, at signing time | [`policies/cdp_recipient_allowlist_policy.json`](policies/cdp_recipient_allowlist_policy.json) |
 | **AgentCore Payment Session** | cumulative, time-bounded spend ceiling (`maxSpendAmount`) | created in [`setup/provision_payments.py`](setup/provision_payments.py) |
 | **App-level check** | always-on cap + allowlist backstop | [`agent/guardrails_demo.py`](agent/guardrails_demo.py) |
@@ -55,6 +55,7 @@ Agent (Strands + http_request)
 │   └── cdp_policy_payment_demo.py # live: a CDP policy makes AgentCore ProcessPayment fail
 ├── policies/
 │   ├── agentcore_policy.cedar    # per-tx cap + recipient allowlist (Cedar)
+│   ├── dogwood/                  # temporal policies: provenance, velocity, rolling cap (+ tests)
 │   └── cdp_recipient_allowlist_policy.json
 ├── docs/SECURITY.md              # threat model + the four guardrail layers
 ├── .env.coinbase.sample          # copy to .env; never commit real secrets
@@ -133,6 +134,16 @@ python setup/cdp_policy_setup.py "$WALLET_ADDRESS"   # attach
 python setup/cdp_policy_remove.py "$WALLET_ADDRESS"  # detach + delete after testing
 ```
 
+**4b — (Optional) test the Dogwood temporal policies locally** — no AWS
+needed. Validates the policy set and replays 10 scenarios (injected recipient,
+velocity, rolling spend cap, and more). See
+[`policies/dogwood/README.md`](policies/dogwood/README.md) to build the CLI and
+deploy the rules:
+
+```bash
+DOGWOOD=/path/to/dogwood python policies/dogwood/test_dogwood_policies.py
+```
+
 **5 — Run:**
 
 ```bash
@@ -153,6 +164,10 @@ This sample has been run end-to-end against the provisioned stack:
   `InsufficientBudget` (`Pending amount: 0.0001 USD, Transaction amount: 0.001000 USD`);
   the budget was never touched. No LLM narration involved — the rejection is the
   raised exception.
+- **Dogwood temporal policies** (`policies/dogwood/`) are validated and
+  replay-tested locally with the `dogwood` 1.0 CLI against a copy of
+  AgentCore's documented event schema: 10/10 scenarios pass. They have not yet
+  been deployed to a live AgentCore Gateway in this sample.
 
 ## Security notes
 
@@ -166,6 +181,8 @@ This sample has been run end-to-end against the provisioned stack:
 
 - AgentCore Payments — https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/payments-getting-started.html
 - AgentCore Policy — https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/policy.html
+- AgentCore temporal policies (Dogwood) — https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/policy-temporal.html
+- Dogwood language guide — https://dogwood-policy.github.io/dogwood/index.html
 - AWS samples — https://github.com/awslabs/agentcore-samples (`01-features/08-agents-that-transact`)
 - Coinbase CDP security & policies — https://docs.cdp.coinbase.com/wallets/security-and-policies/security-overview
 - x402 protocol — https://docs.cdp.coinbase.com/x402/welcome

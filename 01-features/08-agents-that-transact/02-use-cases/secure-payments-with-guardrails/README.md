@@ -33,7 +33,7 @@ includes an end-to-end test notebook (`test_privy_payment_agent.ipynb`).
 
 | Layer | Enforces | Where |
 |---|---|---|
-| **AgentCore Policy** (Cedar) | per-transaction amount cap + recipient allowlist, before execution | provider-agnostic |
+| **AgentCore Policy** (Cedar + Dogwood) | per-transaction amount cap + recipient allowlist, before execution; Dogwood temporal rules add recipient provenance, a velocity limit, and a rolling spend cap | provider-agnostic |
 | **Wallet Policy Engine** (CDP / Privy) | recipient `to` allowlist **+** per-tx `value` cap on the EIP-3009 typed data, at signing time | provider-specific |
 | **AgentCore Payment Session** | cumulative, time-bounded spend ceiling (`maxSpendAmount`) | provider-agnostic |
 | **App-level check** | always-on cap + allowlist backstop | provider-agnostic |
@@ -60,6 +60,23 @@ The x402 "exact" scheme does not broadcast a transaction — it signs an **EIP-3
 `signEndUserEvmTypedData`; on Privy it is `eth_signTypedData_v4`. Both wallet
 policy engines screen that signing operation by matching the typed-data message
 fields (`to`, `value`) and the domain `chainId`.
+
+## Temporal rules with Dogwood
+
+Cedar rules see one request at a time. AgentCore **temporal policies**, written in
+**Dogwood** (an open-source Cedar superset), add conditions over the agent's earlier
+actions in the same policy session. Both samples ship the same tested policy set in
+`policies/dogwood/`:
+
+- **Recipient provenance** — pay only an address that a trusted lookup tool returned
+  earlier in the session, so an injected or invented recipient is denied by default.
+- **Velocity limit** — no more than five payments in any 10-minute window.
+- **Rolling spend cap** — no payment that brings the last hour's total to $2.00.
+
+`policies/dogwood/test_dogwood_policies.py` validates the set and replays 10 scenarios
+with the `dogwood` CLI (no AWS needed). Temporal history is per policy session and the
+caller picks the session ID, so these rules bound behavior within a run; the Payment
+Session `maxSpendAmount` stays the hard ceiling.
 
 ## Choosing between provider policies — a defense-in-depth lesson
 
@@ -100,6 +117,8 @@ sample is for local setup only and is git-ignored. Never commit a real `.env`.
 
 - Amazon Bedrock AgentCore Payments — https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/payments-getting-started.html
 - AgentCore Policy (Cedar) — https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/policy.html
+- AgentCore temporal policies (Dogwood) — https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/policy-temporal.html
+- Dogwood language guide — https://dogwood-policy.github.io/dogwood/index.html
 - Coinbase CDP Policy Engine — https://docs.cdp.coinbase.com/wallets/security-and-policies/policy-engine/overview
 - Privy policies — https://docs.privy.io/controls/policies
 - x402 protocol — https://docs.cdp.coinbase.com/x402/welcome

@@ -37,7 +37,7 @@ exactly what the Privy policy engine screens.
 
 | Layer | Enforces | Where |
 |---|---|---|
-| **AgentCore Policy** (Cedar) | per-transaction amount cap + recipient allowlist, evaluated before execution | [`policies/agentcore_policy.cedar`](policies/agentcore_policy.cedar) |
+| **AgentCore Policy** (Cedar + Dogwood) | per-transaction amount cap + recipient allowlist, evaluated before execution; with Dogwood temporal policies, also recipient provenance, a velocity limit, and a rolling spend cap | [`policies/agentcore_policy.cedar`](policies/agentcore_policy.cedar), [`policies/dogwood/`](policies/dogwood/) |
 | **Privy Policy Engine** | recipient `to` allowlist **+** per-transaction `value` cap on the EIP-3009 typed data, fail-closed, at signing time | [`policies/privy_allowlist_cap_policy.json`](policies/privy_allowlist_cap_policy.json) |
 | **AgentCore Payment Session** | cumulative, time-bounded spend ceiling (`maxSpendAmount`) | created in [`setup/provision_payments.py`](setup/provision_payments.py) |
 | **App-level check** | always-on cap + allowlist backstop | [`agent/guardrails_demo.py`](agent/guardrails_demo.py) |
@@ -81,6 +81,7 @@ AgentCore Payments pentest found in a Privy `to` denylist.
 │   └── privy_policy_payment_demo.py # live: a Privy policy makes AgentCore ProcessPayment fail
 ├── policies/
 │   ├── agentcore_policy.cedar    # per-tx cap + recipient allowlist (Cedar)
+│   ├── dogwood/                  # temporal policies: provenance, velocity, rolling cap (+ tests)
 │   └── privy_allowlist_cap_policy.json
 ├── docs/SECURITY.md              # threat model + the four guardrail layers
 ├── .env.privy.sample             # copy to .env; never commit real secrets
@@ -162,6 +163,16 @@ python setup/privy_policy_payment_demo.py
 python setup/privy_policy_remove.py
 ```
 
+**4b — (Optional) test the Dogwood temporal policies locally** — no AWS
+needed. Validates the policy set and replays 10 scenarios (injected recipient,
+velocity, rolling spend cap, and more). See
+[`policies/dogwood/README.md`](policies/dogwood/README.md) to build the CLI and
+deploy the rules:
+
+```bash
+DOGWOOD=/path/to/dogwood python policies/dogwood/test_dogwood_policies.py
+```
+
 **5 — Run:**
 
 ```bash
@@ -176,6 +187,10 @@ python agent/session_budget_demo.py     # live: over-budget payment refused serv
   behave identically to the Coinbase sample, which was verified live on Base
   Sepolia (`session_budget_demo.py` refuses an over-budget payment server-side
   with `InsufficientBudget`).
+- **Dogwood temporal policies** (`policies/dogwood/`) are validated and
+  replay-tested locally with the `dogwood` 1.0 CLI against a copy of
+  AgentCore's documented event schema: 10/10 scenarios pass. They have not yet
+  been deployed to a live AgentCore Gateway in this sample.
 - **Privy signing-layer policy** (`privy_policy_setup.py` /
   `privy_policy_payment_demo.py`) is built to Privy's documented policy API. Run
   it against your own Privy app + AgentCore stack to confirm enforcement, and read
@@ -194,6 +209,8 @@ python agent/session_budget_demo.py     # live: over-budget payment refused serv
 
 - AgentCore Payments — https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/payments-getting-started.html
 - AgentCore Policy — https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/policy.html
+- AgentCore temporal policies (Dogwood) — https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/policy-temporal.html
+- Dogwood language guide — https://dogwood-policy.github.io/dogwood/index.html
 - AWS samples — https://github.com/awslabs/agentcore-samples (`01-features/08-agents-that-transact`)
 - Privy policies — https://docs.privy.io/controls/policies
 - Privy AgentCore SDK — https://github.com/privy-io/aws-agentcore-sdk

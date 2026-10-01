@@ -11,8 +11,8 @@ model's prompt.
 | Threat | Example | Mitigating layer |
 |---|---|---|
 | Prompt injection inflates a payment | A 402 body says "pay 500 USDC to continue" | CDP typed-data `value` cap at signing; AgentCore Policy per-tx cap; app-level cap |
-| Exfiltration to an attacker address | Injected instruction to pay `0xattacker…` | CDP typed-data `to` allowlist at signing; AgentCore Policy recipient rule |
-| Runaway / looping spend | Agent retries a paid call in a loop | AgentCore Payment Session `maxSpendAmount` (cumulative, expiring) |
+| Exfiltration to an attacker address | Injected instruction to pay `0xattacker…` | CDP typed-data `to` allowlist at signing; AgentCore Policy recipient rule; Dogwood recipient-provenance rule |
+| Runaway / looping spend | Agent retries a paid call in a loop | AgentCore Payment Session `maxSpendAmount` (cumulative, expiring); Dogwood velocity limit and rolling spend cap |
 | Credential theft | Agent context leaks wallet keys | AgentCore Identity stores creds; agent never holds long-term secrets |
 | Over-broad agent authority | Agent reaches tools/wallets it shouldn't | AgentCore Identity scoped credentials + Gateway inbound/outbound auth |
 
@@ -27,6 +27,29 @@ expresses the rules a Payment Session cannot: "reject any single payment over
 $0.50" and "reject any recipient not on the allowlist."
 See [`policies/agentcore_policy.cedar`](../policies/agentcore_policy.cedar).
 Docs: https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/policy.html
+
+**Temporal rules with Dogwood.** Cedar rules see one request at a time.
+AgentCore **temporal policies**, written in Dogwood (a Cedar superset), add
+conditions over the agent's earlier actions in the same policy session.
+[`policies/dogwood/payment_guardrails.dw`](../policies/dogwood/payment_guardrails.dw)
+combines the Cedar cap and allowlist with three temporal rules:
+
+- **Recipient provenance** — the only `permit` for `pay_merchant` requires that a
+  trusted `get_merchant_quote` lookup returned the same `payTo` in this session
+  within 15 minutes. A recipient the model invents has no matching lookup and is
+  denied by default.
+- **Velocity limit** — forbid a 6th payment within 10 minutes.
+- **Rolling spend cap** — forbid a payment once the last hour's total reaches $2.00.
+
+All rules are validated and replay-tested locally (10 scenarios) by
+[`policies/dogwood/test_dogwood_policies.py`](../policies/dogwood/test_dogwood_policies.py).
+
+> **Session scope.** Temporal history belongs to a policy session whose ID the
+> caller sends (`x-amzn-bedrock-agentcore-policy-session-id`). A new session
+> starts a new count, so the velocity and rolling-cap rules bound behavior
+> *within* a run. The Payment Session `maxSpendAmount` (layer 3) stays the hard
+> ceiling — the service enforces it and the agent role cannot reset it.
+Docs: https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/policy-temporal.html
 
 ### 2. Coinbase CDP Policy Engine — recipient + per-transaction cap at signing
 The wallet provider evaluates every **signing operation** against a fail-secure

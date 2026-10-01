@@ -1,0 +1,48 @@
+// Action schema for the payment tools exposed through an AgentCore Gateway.
+// Tool names follow the Gateway convention <TargetName>___<tool-name>.
+// `amount` is USDC base units (6 decimals): 500000 = $0.50.
+namespace AgentCore {
+  type PayMerchantInput = {
+    amount: Long,
+    recipient: String
+  };
+
+  type PayMerchantOutput = {
+    status: String
+  };
+
+  type GetMerchantQuoteInput = {
+    resourceUrl: String
+  };
+
+  type GetMerchantQuoteOutput = {
+    payTo: String,
+    amount: Long
+  };
+
+  entity Gateway;
+
+  entity OAuthUser = {
+    id: String
+  };
+
+  action "PaymentsTarget___pay_merchant" appliesTo {
+    principal: [OAuthUser],
+    resource: [Gateway],
+    context: {
+      input: PayMerchantInput,
+      output?: PayMerchantOutput,
+      sessionId: String
+    }
+  };
+
+  action "PaymentsTarget___get_merchant_quote" appliesTo {
+    principal: [OAuthUser],
+    resource: [Gateway],
+    context: {
+      input: GetMerchantQuoteInput,
+      output?: GetMerchantQuoteOutput,
+      sessionId: String
+    }
+  };
+}

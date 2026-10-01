@@ -1,0 +1,34 @@
+// Mirrors the temporal event schema documented for Policy in Amazon Bedrock
+// AgentCore (policy-temporal-authoring.html): request / response / error,
+// with `eventResource` and a universal session pin, and the 24h window cap.
+// Used only for local `dogwood validate` / `dogwood replay`; AgentCore applies
+// its own built-in schema when you deploy the policy.
+max_window = 24h
+
+// Recorded for each authorized request.
+decision event <A>::request {
+    ...inputs(A),
+    eventPrincipal: principalType(A),
+    eventResource:  resourceType(A),
+    requestId:      String,
+    pin sessionId:  String = context.sessionId,
+}
+
+// Recorded when the tool returns successfully; carries inputs and outputs.
+event <A>::response {
+    ...inputs(A),
+    ...outputs(A),
+    eventPrincipal: principalType(A),
+    eventResource:  resourceType(A),
+    requestId:      String,
+    pin sessionId:  String = context.sessionId,
+}
+
+// Recorded when the request is denied or the tool returns an error.
+event <A>::error {
+    ...inputs(A),
+    eventPrincipal: principalType(A),
+    eventResource:  resourceType(A),
+    requestId:      String,
+    pin sessionId:  String = context.sessionId,
+}

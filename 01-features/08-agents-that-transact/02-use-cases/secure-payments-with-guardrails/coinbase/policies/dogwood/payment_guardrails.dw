@@ -1,0 +1,100 @@
+// AgentCore Policy — payment guardrails in Dogwood (temporal) + Cedar.
+//
+// Dogwood is the policy language behind AgentCore temporal policies. Every
+// valid Cedar policy is valid Dogwood, so the point-in-time Cedar rules and the
+// temporal rules live in one policy set. Default-deny; any `forbid` wins.
+//
+// Tools are exposed through an AgentCore Gateway as
+//   PaymentsTarget___get_merchant_quote  (trusted lookup: returns the payTo)
+//   PaymentsTarget___pay_merchant        (input.amount in USDC base units,
+//                                         input.recipient = x402 payTo)
+//
+// Replace the Gateway ARN and allowlisted address with your own. Test locally:
+//   ./run_dogwood_tests.sh
+// Docs: https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/policy-temporal.html
+
+// ── Trusted lookup ───────────────────────────────────────────────────────────
+// Must be permitted: only a permitted, completed call is recorded as a
+// `response` event, which the provenance rule below depends on.
+@id("permit_get_merchant_quote")
+permit (
+    principal,
+    action == AgentCore::Action::"PaymentsTarget___get_merchant_quote",
+    resource == AgentCore::Gateway::"arn:aws:bedrock-agentcore:us-west-2:123456789012:gateway/payments-gateway"
+);
+
+// ── Recipient provenance (temporal) ──────────────────────────────────────────
+// The ONLY permit for pay_merchant: the recipient must equal a payTo that the
+// trusted lookup returned in this session within the last 15 minutes. An
+// address the model invented (e.g. from a prompt injection) has no matching
+// lookup, so the payment is denied by default.
+@id("permit_pay_after_quote")
+permit (
+    principal,
+    action == AgentCore::Action::"PaymentsTarget___pay_merchant",
+    resource == AgentCore::Gateway::"arn:aws:bedrock-agentcore:us-west-2:123456789012:gateway/payments-gateway"
+)
+when temporal {
+    formerly within 15m AgentCore::Action::"PaymentsTarget___get_merchant_quote"::response{
+        eventResource: resource,
+        output.payTo:  context.input.recipient
+    }
+};
+
+// ── Per-transaction cap (Cedar, point-in-time) ───────────────────────────────
+// Forbid any single payment above $0.50 (500000 base units).
+@id("forbid_over_per_tx_cap")
+forbid (
+    principal,
+    action == AgentCore::Action::"PaymentsTarget___pay_merchant",
+    resource == AgentCore::Gateway::"arn:aws:bedrock-agentcore:us-west-2:123456789012:gateway/payments-gateway"
+)
+when { context.input.amount > 500000 };
+
+// ── Recipient allowlist (Cedar, point-in-time) ───────────────────────────────
+// Even a looked-up recipient must be on the approved list (lowercase payTo).
+@id("forbid_recipient_not_allowlisted")
+forbid (
+    principal,
+    action == AgentCore::Action::"PaymentsTarget___pay_merchant",
+    resource == AgentCore::Gateway::"arn:aws:bedrock-agentcore:us-west-2:123456789012:gateway/payments-gateway"
+)
+unless {
+    [
+        "0xa27f7cb624b57c79d7f9de03ae9f5c705c2858db",   // x402 test merchant payTo
+        "0x2222222222222222222222222222222222222222"    // second approved merchant (example)
+    ].contains(context.input.recipient)
+};
+
+// ── Velocity limit (temporal) ────────────────────────────────────────────────
+// Forbid a 6th payment within any 10-minute window. The count includes the
+// current request.
+@id("forbid_velocity")
+forbid (
+    principal,
+    action == AgentCore::Action::"PaymentsTarget___pay_merchant",
+    resource == AgentCore::Gateway::"arn:aws:bedrock-agentcore:us-west-2:123456789012:gateway/payments-gateway"
+)
+when temporal {
+    exists (n: Long).
+        (count for (t: Timepoint).
+            where (formerly within 10m (AgentCore::Action::"PaymentsTarget___pay_merchant"::request{ eventResource: resource } && tp(t)))) == n
+        && n > 5
+};
+
+// ── Rolling spend cap (temporal) ─────────────────────────────────────────────
+// Forbid a payment once the last hour's total, including this request, reaches
+// $2.00 (2000000 base units). Summing `request` events counts in-flight
+// payments too.
+@id("forbid_rolling_spend_cap")
+forbid (
+    principal,
+    action == AgentCore::Action::"PaymentsTarget___pay_merchant",
+    resource == AgentCore::Gateway::"arn:aws:bedrock-agentcore:us-west-2:123456789012:gateway/payments-gateway"
+)
+when temporal {
+    exists (total: Long).
+        (sum amt for (amt: Long), (t: Timepoint).
+            where (formerly within 1h (AgentCore::Action::"PaymentsTarget___pay_merchant"::request{ eventResource: resource, input.amount: amt } && tp(t)))) == total
+        && total >= 2000000
+};
