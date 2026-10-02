@@ -14,9 +14,16 @@ condition set and checks each outcome:
      This proves that delegation, funding, and the session are in order AND
      that the policy's rules match what the signer sends (a policy whose
      typed-data `types` never match would refuse this payment too).
-  1. NEGATIVE — the set holds only a decoy recipient. ProcessPayment must FAIL
-     with a policy error (any other error makes the step inconclusive).
-  2. ALLOWED  — the merchant again. ProcessPayment must SUCCEED again.
+  1. NEGATIVE — the set holds only a decoy recipient. ProcessPayment must FAIL.
+  2. ALLOWED  — the merchant again. ProcessPayment must SUCCEED again. Because
+     only the condition set changed between steps, 0-1-2 together show the
+     refusal in step 1 came from the policy.
+
+Note: AgentCore currently reports a Privy policy refusal as a generic
+`InternalServerException` ("Something went wrong in processPayment"), which the
+SDK retries before giving up, rather than as a policy error (Coinbase CDP
+refusals come back as `AccessDeniedException ... blocked by a policy`). The demo
+therefore accepts either error in step 1, and relies on step 2 to confirm it.
 
 The condition set's original contents are restored at the end. No payment
 header is sent to the merchant, so no USDC moves (each step draws $0.001 from a
@@ -142,20 +149,29 @@ def main() -> int:
 
         privy.replace_condition_set_items(set_id, [DECOY_RECIPIENT])
         ok, err = try_pay(mgr, c, f"1) NEGATIVE — condition set = decoy {DECOY_RECIPIENT} only:")
+        generic = False
         if ok:
             print("  FAIL: the policy did not block signing.")
             rc = 1
-        elif not is_policy_refusal(err):
-            print("  FAIL (inconclusive): ProcessPayment failed, but not with a policy error.")
-            rc = 1
+        elif is_policy_refusal(err):
+            print("  Refused with a policy error.")
+        elif "InternalServerException" in err:
+            generic = True
+            print("  Refused, but AgentCore reported a generic InternalServerException rather than a "
+                  "policy error. Step 2 confirms whether the policy caused it.")
         else:
-            print("  OK: Privy refused to sign, so ProcessPayment failed.")
+            print("  FAIL (inconclusive): ProcessPayment failed with an unexpected error.")
+            rc = 1
 
         if rc == 0:
             privy.replace_condition_set_items(set_id, [merchant])
             ok, _ = try_pay(mgr, c, f"2) ALLOWED AGAIN — condition set = merchant {merchant}:")
             if ok:
-                print("  OK: allowed again, so step 1 was the recipient rule, not a blanket deny.")
+                print("  OK: allowed again. Only the condition set changed between steps, so the "
+                      "refusal in step 1 was the policy's recipient rule.")
+                if generic:
+                    print("  NOTE: the policy is enforced, but the refusal surfaced as "
+                          "InternalServerException — callers cannot tell it from an outage.")
             else:
                 print("  FAIL: the allowed payment was refused after the negative step.")
                 rc = 1

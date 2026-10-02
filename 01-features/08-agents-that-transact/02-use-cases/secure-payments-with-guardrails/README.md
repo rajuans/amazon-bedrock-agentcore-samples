@@ -25,9 +25,16 @@ the model cooperates.
 | [`coinbase/`](coinbase/) | Coinbase CDP | CDP Policy Engine — typed-data `to` allowlist + `value` cap, project-scoped |
 | [`privy/`](privy/) | Stripe (Privy) | Privy Policy Engine — typed-data `to` allowlist + `value` cap, per-wallet, fail-closed |
 
-Each folder is self-contained with its own `README.md`, `docs/SECURITY.md`,
-setup scripts, agent, policy files, and `.env.*.sample`. The `privy/` folder also
-includes an end-to-end test notebook (`test_privy_payment_agent.ipynb`).
+Each folder is self-contained: a step-by-step `README.md` (with expected output,
+live verification results, and troubleshooting), `docs/CODE_WALKTHROUGH.md` (every
+file and function), `docs/SECURITY.md` (threat model), setup scripts, the agent,
+policy files with a local test suite, and a `.env.*.sample`. The `privy/` folder
+also includes `frontend-patch/` (attaches the Privy policy at delegation) and an
+end-to-end notebook (`test_privy_payment_agent.ipynb`).
+
+Both samples were run end to end on Base Sepolia: the agent's paid purchase, the
+session budget, and the wallet-provider policy through AgentCore `ProcessPayment`
+(allowed, refused, allowed again).
 
 ## The four guardrail layers (both samples)
 

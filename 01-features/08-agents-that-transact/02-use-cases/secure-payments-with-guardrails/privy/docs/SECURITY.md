@@ -112,6 +112,16 @@ Docs: https://docs.privy.io/controls/policies/overview
 > In production, also give the condition set and policy an `owner_id`, so the app
 > secret alone cannot edit the allowlist (the sample omits this for brevity).
 
+> **How a Privy refusal surfaces.** Through AgentCore, a payment that the Privy
+> policy refuses currently comes back from `ProcessPayment` as a generic
+> `InternalServerException` ("Something went wrong in processPayment"), which the
+> SDK retries before giving up — not as a policy error. (Coinbase CDP refusals come
+> back as `AccessDeniedException … blocked by a policy`.) The policy is still
+> enforced — `privy_policy_payment_demo.py` shows allowed → refused → allowed with
+> only the recipient list changing — but callers cannot tell the refusal from an
+> outage. Alert on these errors and correlate with Privy's policy logs; don't treat
+> them as transient.
+
 ### 3. AgentCore Payment Session — cumulative, time-bounded budget
 `create_payment_session(limits={"maxSpendAmount": {"value": "1.00", "currency": "USD"}},
 expiry_time_in_minutes=60)` bounds **total** spend across the session; the

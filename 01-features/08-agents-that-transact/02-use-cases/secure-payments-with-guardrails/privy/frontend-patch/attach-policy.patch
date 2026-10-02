@@ -1,0 +1,53 @@
+--- a/src/components/modals/connect-agent-modal.tsx
++++ b/src/components/modals/connect-agent-modal.tsx
+@@ -23,7 +23,7 @@
+   onSuccess,
+ }: ConnectAgentModalProps) {
+   const { user } = usePrivy();
+-  const { addSessionSigners } = useSessionSigners();
++  const { addSessionSigners, removeSessionSigners } = useSessionSigners();
+   const [loading, setLoading] = useState(false);
+   const [error, setError] = useState<string | null>(null);
+ 
+@@ -54,14 +54,17 @@
+         privyWallets.map((wallet) =>
+           addSessionSigners({
+             address: wallet.address,
+-            signers: [{ signerId, policyIds: [] }],
+-          }).catch((err: unknown) => {
++            signers: [{ signerId, policyIds: ["__PRIVY_POLICY_ID__"] }],
++          }).catch(async (err: unknown) => {
+             const msg = err instanceof Error ? err.message : String(err);
+-            // addSessionSigners is idempotent from the caller's perspective:
+-            // Privy throws "signer already exists" when the signer was previously
+-            // added — suppressing that error makes it safe to re-call this for
+-            // wallets that are already covered (e.g. after a new wallet is provisioned).
+             if (!msg.toLowerCase().includes("already")) throw err;
++            // [blog sample] The signer exists, possibly without the policy. Re-add it so
++            // the agent signer always carries the policy (override_policy_ids).
++            await removeSessionSigners({ address: wallet.address });
++            await addSessionSigners({
++              address: wallet.address,
++              signers: [{ signerId, policyIds: ["__PRIVY_POLICY_ID__"] }],
++            });
+           }),
+         ),
+       );
+--- a/src/app/api/check-signers/route.ts
++++ b/src/app/api/check-signers/route.ts
+@@ -31,10 +31,13 @@
+       });
+       if (!res.ok) return false;
+       const wallet = (await res.json()) as {
+-        additional_signers?: { signer_id: string }[];
++        additional_signers?: { signer_id: string; override_policy_ids?: string[] }[];
+       };
++      // [blog sample] Connected only if the agent signer also carries the policy.
+       return (wallet.additional_signers ?? []).some(
+-        (s) => s.signer_id === signerId,
++        (s) =>
++          s.signer_id === signerId &&
++          (s.override_policy_ids ?? []).includes("__PRIVY_POLICY_ID__"),
+       );
+     }),
+   );
