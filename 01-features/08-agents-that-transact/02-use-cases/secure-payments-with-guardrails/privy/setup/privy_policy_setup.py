@@ -1,46 +1,43 @@
 """Optional — attach a Privy signing-layer policy to the embedded wallet.
 
 This is the fail-secure backstop of the recipient + per-transaction guardrails,
-the Stripe/Privy analogue of the Coinbase CDP policy. The Privy policy engine
-evaluates every signing operation against the policies attached to the wallet
-(`policy_ids`) and is **fail-closed**: within a method, a request that matches no
-ALLOW rule is denied, and an unlisted method defaults to DENY.
+the Stripe/Privy analogue of the Coinbase CDP policy. Privy evaluates every
+signing request against the policies attached to the wallet (`policy_ids`).
+Within a method, a request that matches no ALLOW rule is denied, and an
+unlisted method defaults to DENY.
 
-x402's EVM "exact" scheme does NOT broadcast a transaction — the wallet signs an
-EIP-3009 `TransferWithAuthorization` as **EIP-712 typed data** via
-`eth_signTypedData_v4`; a facilitator submits it on-chain. So the rule matches the
-typed-data message fields by path:
+x402's EVM "exact" scheme signs an EIP-3009 `TransferWithAuthorization` as
+EIP-712 typed data via `eth_signTypedData_v4`. The policy allows that method
+only when ALL of these hold:
 
-  • `to`    -> recipient allowlist  (in_condition_set, referencing a condition set)
-  • `value` -> per-transaction cap  (lte, USDC base units as hex)
-  • domain `chainId` -> pin the chain (Base Sepolia 84532)
+  • domain `chainId`  == 84532 (Base Sepolia)
+  • message `to`      in the approved-recipients condition set
+  • message `value`   <= the per-transaction cap (USDC base units, as hex)
 
-Because unmatched signing requests default to DENY, a single ALLOW rule gated on
-all three conditions yields a fail-closed allowlist + cap: a payment to a
-non-allowlisted recipient, above the cap, or on the wrong chain simply matches no
-ALLOW rule and is refused at signing time.
+CRITICAL — exact `types` match. Privy evaluates a typed-data message condition
+only when the rule's `types` map equals the signing request's `types` map,
+including whether `EIP712Domain` is declared and the field order. On a mismatch
+the condition is false. For this ALLOW-only policy a mismatch denies the payment
+(fail-closed). Because clients differ on whether they send `EIP712Domain`, the
+policy carries two otherwise-identical ALLOW rules, one per shape. Run
+`setup/privy_policy_probe.py` to see which shape your wallet's signer accepts.
 
-CRITICAL: the typed-data `types` map must match the signing request EXACTLY, or
-the condition evaluates to FALSE (it does not skip). For this ALLOW-allowlist
-shape a mismatch fails closed (denies the payment) — safe. A DENY-based denylist
-would instead fail OPEN on a mismatch; that is the gap the AgentCore Payments
-pentest found in an OFAC `to` denylist, and why this sample uses an allowlist.
+Wallet ownership. AgentCore creates a user-owned Privy embedded wallet and adds
+the app's authorization key as a signer. This script reads the wallet first:
+  - no owner                          -> update with the app secret,
+  - owned by this authorization key   -> update with a signed request,
+  - owned by someone else (the user)  -> stop and explain (the app cannot
+                                         change a user-owned wallet's policies).
 
-Uses the Privy REST API directly (HTTP Basic app-id:app-secret + the
-`privy-app-id` header), matching Privy's documented curl examples. For the demo
-the condition set and policy are created WITHOUT an owner, so the app secret
-alone can manage them. In production, set PRIVY_OWNER_ID and sign owner-authorized
-requests with the P-256 authorization key (`privy-authorization-signature`).
-
-    python setup/privy_policy_setup.py            # resolve wallet id from WALLET_ADDRESS
+    python setup/privy_policy_setup.py              # wallet found by WALLET_ADDRESS
     python setup/privy_policy_setup.py <wallet_id>
 
-Env knobs (fall back to .env / the sample defaults):
+Env knobs:
     RECIPIENT_ALLOWLIST   comma-separated merchant `to` addresses to allow
     PER_TX_CAP_USD        per-transaction USDC cap (converted to 6-dp base units)
-    PRIVY_OWNER_ID        optional owner id for the condition set + policy
+    CHAIN_ID              EIP-155 chain id (default 84532, Base Sepolia)
 
-Docs: https://docs.privy.io/controls/policies
+Docs: https://docs.privy.io/controls/policies/overview
 """
 
 import os
@@ -49,15 +46,15 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "agent"))
 
-import requests
 from dotenv import load_dotenv
 
 from utils import ENV_FILE, require_env, write_env_values
 
 load_dotenv(ENV_FILE, override=True)
 
-PRIVY_BASE = os.environ.get("PRIVY_API_BASE", "https://api.privy.io").rstrip("/")
-CHAIN_ID = os.environ.get("CHAIN_ID", "84532")  # Base Sepolia testnet
+from privy_client import PrivyClient, PrivyError, eip3009_typed_data, wallet_update_mode  # noqa: E402
+
+CHAIN_ID = os.environ.get("CHAIN_ID", "84532")
 
 # Merchant recipient(s) to allow — the x402 `payTo`, NOT the token contract.
 RECIPIENT_ALLOWLIST = [
@@ -68,164 +65,98 @@ RECIPIENT_ALLOWLIST = [
     if a.strip()
 ]
 PER_TX_CAP_USD = float(os.environ.get("PER_TX_CAP_USD", "0.50"))
-# USDC has 6 decimals; the typed-data `value` field is in base units. Privy
-# compares typed-data uint256 fields as hex.
-PER_TX_CAP_BASE_UNITS = int(round(PER_TX_CAP_USD * 1_000_000))
-PER_TX_CAP_HEX = hex(PER_TX_CAP_BASE_UNITS)
-
-OWNER_ID = os.environ.get("PRIVY_OWNER_ID", "").strip() or None
-
-# EIP-3009 TransferWithAuthorization is the message x402 signs for USDC. The
-# `types` map must match the signing request exactly or the condition is false.
-EIP3009_TYPED_DATA = {
-    "types": {
-        "TransferWithAuthorization": [
-            {"name": "from", "type": "address"},
-            {"name": "to", "type": "address"},
-            {"name": "value", "type": "uint256"},
-            {"name": "validAfter", "type": "uint256"},
-            {"name": "validBefore", "type": "uint256"},
-            {"name": "nonce", "type": "bytes32"},
-        ]
-    },
-    "primary_type": "TransferWithAuthorization",
-}
+# USDC has 6 decimals; Privy compares uint256 typed-data fields given as hex.
+PER_TX_CAP_HEX = hex(int(round(PER_TX_CAP_USD * 1_000_000)))
 
 
-class PrivyClient:
-    """Minimal Privy REST client (Basic auth + privy-app-id header)."""
-
-    def __init__(self):
-        self.app_id = require_env("PRIVY_APP_ID")
-        self.session = requests.Session()
-        self.session.auth = (self.app_id, require_env("PRIVY_APP_SECRET"))
-        self.session.headers.update({
-            "privy-app-id": self.app_id,
-            "Content-Type": "application/json",
+def build_allowlist_rules(condition_set_id, cap_hex=PER_TX_CAP_HEX, chain_id=CHAIN_ID):
+    """Two fail-closed ALLOW rules — identical except for the declared `types`
+    shape (with and without EIP712Domain), so the policy matches whichever
+    shape the signing client sends."""
+    rules = []
+    for with_domain in (True, False):
+        td = eip3009_typed_data(with_domain)
+        rules.append({
+            "name": f"Allow x402 USDC to an approved recipient under the cap"
+                    f" ({'with' if with_domain else 'without'} EIP712Domain)",
+            "method": "eth_signTypedData_v4",
+            "action": "ALLOW",
+            "conditions": [
+                {"field_source": "ethereum_typed_data_domain", "field": "chainId",
+                 "operator": "eq", "value": chain_id},
+                {"field_source": "ethereum_typed_data_message", "field": "to",
+                 "operator": "in_condition_set", "value": condition_set_id, "typed_data": td},
+                {"field_source": "ethereum_typed_data_message", "field": "value",
+                 "operator": "lte", "value": cap_hex, "typed_data": td},
+            ],
         })
-
-    def _req(self, method, path, **kwargs):
-        r = self.session.request(method, f"{PRIVY_BASE}{path}", timeout=30, **kwargs)
-        if not r.ok:
-            raise RuntimeError(f"Privy {method} {path} -> {r.status_code}: {r.text}")
-        return r.json() if r.content else {}
-
-    # ── condition sets ────────────────────────────────────────────────────────
-    def create_condition_set(self, name):
-        body = {"name": name}
-        if OWNER_ID:
-            body["owner_id"] = OWNER_ID
-        return self._req("POST", "/v1/condition_sets", json=body)["id"]
-
-    def add_condition_set_items(self, set_id, values):
-        # Store both lowercase and checksummed casings — matching is case-sensitive.
-        items = []
-        seen = set()
-        for v in values:
-            for cased in (v, v.lower()):
-                if cased not in seen:
-                    seen.add(cased)
-                    items.append({"value": cased})
-        return self._req("POST", f"/v1/condition_sets/{set_id}/condition_set_items", json=items)
-
-    # ── policies ──────────────────────────────────────────────────────────────
-    def create_policy(self, rules, name="x402 recipient allowlist and per-tx cap"):
-        body = {"version": "1.0", "name": name, "chain_type": "ethereum", "rules": rules}
-        if OWNER_ID:
-            body["owner_id"] = OWNER_ID
-        return self._req("POST", "/v1/policies", json=body)["id"]
-
-    def delete_policy(self, policy_id):
-        return self._req("DELETE", f"/v1/policies/{policy_id}")
-
-    # ── wallets ─────────────────────────────────────────────────────────────--
-    def get_wallet(self, wallet_id):
-        return self._req("GET", f"/v1/wallets/{wallet_id}")
-
-    def resolve_wallet_id(self, address):
-        """Find the Privy wallet id backing an EVM address (list + match)."""
-        target = address.lower()
-        cursor = None
-        while True:
-            path = "/v1/wallets?chain_type=ethereum&limit=100"
-            if cursor:
-                path += f"&cursor={cursor}"
-            page = self._req("GET", path)
-            for w in page.get("data", page.get("wallets", [])):
-                if (w.get("address") or "").lower() == target:
-                    return w["id"]
-            cursor = page.get("next_cursor")
-            if not cursor:
-                raise RuntimeError(
-                    f"No Privy wallet found for address {address}. Pass the Privy "
-                    "wallet id explicitly: python setup/privy_policy_setup.py <wallet_id>"
-                )
-
-    def attach_policy(self, wallet_id, policy_ids):
-        # Without an owner on the wallet, Basic auth suffices. With an owner, this
-        # PATCH must carry a privy-authorization-signature from the P-256 key.
-        return self._req("PATCH", f"/v1/wallets/{wallet_id}", json={"policy_ids": policy_ids})
+    return rules
 
 
-def build_allowlist_rule(condition_set_id):
-    """A fail-closed ALLOW rule: approved recipient + under cap + right chain."""
-    return {
-        "name": "Allow x402 USDC transfer to an approved recipient under the cap",
-        "method": "eth_signTypedData_v4",
-        "action": "ALLOW",
-        "conditions": [
-            {
-                "field_source": "ethereum_typed_data_domain",
-                "field": "chainId",
-                "operator": "eq",
-                "value": CHAIN_ID,
-            },
-            {
-                "field_source": "ethereum_typed_data_message",
-                "field": "to",
-                "operator": "in_condition_set",
-                "value": condition_set_id,
-                "typed_data": EIP3009_TYPED_DATA,
-            },
-            {
-                "field_source": "ethereum_typed_data_message",
-                "field": "value",
-                "operator": "lte",
-                "value": PER_TX_CAP_HEX,
-                "typed_data": EIP3009_TYPED_DATA,
-            },
-        ],
-    }
+def resolve_wallet(privy, wallet_id_arg=None):
+    wallet_id = wallet_id_arg or os.environ.get("PRIVY_WALLET_ID", "").strip()
+    if wallet_id:
+        return privy.get_wallet(wallet_id)
+    return privy.find_wallet_by_address(require_env("WALLET_ADDRESS"))
+
+
+def describe_wallet(wallet):
+    signers = wallet.get("additional_signers") or []
+    print(f"Privy wallet {wallet['id']}  address {wallet.get('address')}")
+    print(f"  owner_id:           {wallet.get('owner_id')}")
+    print(f"  policy_ids:         {wallet.get('policy_ids') or []}")
+    for s in signers:
+        print(f"  additional signer:  {s.get('signer_id')}  override_policy_ids="
+              f"{s.get('override_policy_ids') or []}")
+    auth_id = os.environ.get("PRIVY_AUTHORIZATION_ID", "").strip()
+    mine = [s for s in signers if s.get("signer_id") == auth_id]
+    if mine and mine[0].get("override_policy_ids"):
+        print("  WARNING: the AgentCore signer has override_policy_ids, which apply to its "
+              "signing instead of the wallet's policy_ids.")
+    if signers and not mine and wallet.get("owner_id") != auth_id:
+        print(f"  WARNING: this app's authorization key ({auth_id}) is not a signer on the "
+              "wallet — delegation may not be complete.")
+
+
+def attach_policy(privy, wallet, policy_id):
+    signed, problem = wallet_update_mode(wallet, os.environ.get("PRIVY_AUTHORIZATION_ID", "").strip())
+    if problem:
+        raise SystemExit(f"Cannot attach the policy: {problem}")
+    current = wallet.get("policy_ids") or []
+    privy.update_wallet(wallet["id"], {"policy_ids": list(dict.fromkeys([*current, policy_id]))},
+                        signed=signed)
+    return signed
 
 
 def main(wallet_id_arg=None):
-    privy = PrivyClient()
-
-    wallet_id = wallet_id_arg or os.environ.get("PRIVY_WALLET_ID", "").strip()
-    if not wallet_id:
-        wallet_id = privy.resolve_wallet_id(require_env("WALLET_ADDRESS"))
-    print(f"Target Privy wallet id: {wallet_id}")
+    privy = PrivyClient.from_env()
+    wallet = resolve_wallet(privy, wallet_id_arg)
+    describe_wallet(wallet)
 
     set_id = privy.create_condition_set("x402 approved recipients")
     privy.add_condition_set_items(set_id, RECIPIENT_ALLOWLIST)
-    print(f"Created approved-recipients condition set {set_id} with {RECIPIENT_ALLOWLIST}")
+    print(f"\nCreated approved-recipients condition set {set_id}: {RECIPIENT_ALLOWLIST}")
 
-    policy_id = privy.create_policy([build_allowlist_rule(set_id)])
+    policy_id = privy.create_policy("x402 recipient allowlist and per-tx cap",
+                                    build_allowlist_rules(set_id))
     print(f"Created policy {policy_id}")
 
-    # Preserve any policies already attached to the wallet.
-    current = privy.get_wallet(wallet_id).get("policy_ids", [])
-    privy.attach_policy(wallet_id, list(dict.fromkeys([*current, policy_id])))
+    try:
+        signed = attach_policy(privy, wallet, policy_id)
+    except (SystemExit, PrivyError):
+        privy.delete_policy(policy_id)  # don't leave an orphaned policy behind
+        raise
 
-    write_env_values(PRIVY_WALLET_ID=wallet_id, PRIVY_CONDITION_SET_ID=set_id,
+    write_env_values(PRIVY_WALLET_ID=wallet["id"], PRIVY_CONDITION_SET_ID=set_id,
                      PRIVY_POLICY_ID=policy_id)
-
-    print(f"\nAttached Privy policy {policy_id} to wallet {wallet_id}")
-    print(f"  method:           eth_signTypedData_v4 (fail-closed: unmatched => DENY)")
-    print(f"  recipient `to` in condition set {set_id} ({RECIPIENT_ALLOWLIST})")
-    print(f"  `value` <= {PER_TX_CAP_HEX} base units (${PER_TX_CAP_USD:.2f} USDC)")
-    print(f"  domain chainId == {CHAIN_ID} (Base Sepolia)")
-    print("\nRemove it after testing:  python setup/privy_policy_remove.py")
+    print(f"\nAttached policy {policy_id} to wallet {wallet['id']}"
+          f"{' (signed with the authorization key)' if signed else ''}")
+    print("  method:          eth_signTypedData_v4 (unmatched => DENY)")
+    print(f"  recipient `to`:  in condition set {set_id}")
+    print(f"  `value`:         <= {PER_TX_CAP_HEX} base units (${PER_TX_CAP_USD:.2f} USDC)")
+    print(f"  domain chainId:  == {CHAIN_ID}")
+    print("\nVerify enforcement:  python setup/privy_policy_probe.py")
+    print("Remove after testing: python setup/privy_policy_remove.py")
 
 
 if __name__ == "__main__":

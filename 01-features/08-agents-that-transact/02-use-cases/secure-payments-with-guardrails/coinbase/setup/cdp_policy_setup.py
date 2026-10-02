@@ -72,7 +72,7 @@ EIP3009_TYPES = {
 }
 
 
-def _build_rule():
+def _build_rule(recipients=None):
     from cdp.policies.types import (
         EvmTypedAddressCondition,
         EvmTypedNumericalCondition,
@@ -88,7 +88,7 @@ def _build_rule():
         ),
         conditions=[
             EvmTypedAddressCondition(
-                path="to", operator="in", addresses=RECIPIENT_ALLOWLIST
+                path="to", operator="in", addresses=recipients or RECIPIENT_ALLOWLIST
             ),
             EvmTypedNumericalCondition(
                 path="value", operator="<=", value=PER_TX_CAP_BASE_UNITS

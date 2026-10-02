@@ -68,36 +68,49 @@ it signs an **EIP-3009 `TransferWithAuthorization`** as EIP-712 typed data via
 - domain `chainId` — pinned to Base Sepolia (`84532`) so the authorization is
   valid only on the intended chain.
 
-Because unmatched requests default to DENY, a single `ALLOW` rule gated on all
-three conditions is a fail-closed allowlist + cap: a payment to the wrong
-recipient, above the cap, or on the wrong chain matches no rule and is refused at
-signing time.
+Because unmatched requests default to DENY, `ALLOW` rules gated on all three
+conditions form a fail-closed allowlist + cap: a payment to the wrong recipient,
+above the cap, or on the wrong chain matches no rule and is refused at signing
+time.
 See [`policies/privy_allowlist_cap_policy.json`](../policies/privy_allowlist_cap_policy.json),
-attached with [`setup/privy_policy_setup.py`](../setup/privy_policy_setup.py) and
-proven end-to-end (a Privy policy making AgentCore `ProcessPayment` fail, then
-removed) by [`setup/privy_policy_payment_demo.py`](../setup/privy_policy_payment_demo.py).
-Docs: https://docs.privy.io/controls/policies
+attached with [`setup/privy_policy_setup.py`](../setup/privy_policy_setup.py),
+checked directly with [`setup/privy_policy_probe.py`](../setup/privy_policy_probe.py),
+and exercised end to end through AgentCore `ProcessPayment` (a decoy-only policy
+must block the payment; a merchant-allowed policy must let it through) by
+[`setup/privy_policy_payment_demo.py`](../setup/privy_policy_payment_demo.py).
+Docs: https://docs.privy.io/controls/policies/overview
 
-> **Allowlist, not denylist — and why.** For an `ethereum_typed_data_message`
-> condition, the `types` map in the rule **must match the signing request's typed
-> data exactly**. If it does not, Privy evaluates the condition to `false` — it
-> does **not** skip it. For a fail-closed `ALLOW` rule that is safe: a mismatch
-> denies the payment. For a `DENY`-based denylist (e.g. OFAC-sanctioned `to`
-> addresses) the same mismatch fails **open** — the `DENY` never fires and the
-> signature proceeds. An AgentCore Payments pentest observed exactly this: a Privy
-> `DENY` on `to` via `in_condition_set` did not block signing to a sanctioned
-> address, while a chain restriction (`chainId eq`) did enforce. This sample
-> therefore uses the fail-closed allowlist shape. If you must run a denylist for
-> compliance, validate it against every typed-data shape your app signs, pair it
-> with `ALLOW` rules scoped to the methods/chains you use, add an owner, and alert
-> on an empty or shrunken condition set.
+> **The `types` map must match exactly.** Privy evaluates an
+> `ethereum_typed_data_message` condition only when the rule's `types` map equals
+> the signing request's `types` map — **including whether `EIP712Domain` is
+> declared**, every other type, and field order. On a mismatch the condition
+> evaluates to `false`; it does not skip. Clients differ on whether they send
+> `EIP712Domain`, so the policy carries two otherwise-identical `ALLOW` rules, one
+> per shape. Run `privy_policy_probe.py` to see which shape your signer sends.
 
-> **Scope and ownership.** Privy policies are **per-wallet** — every wallet your
-> app creates must carry the policy via `policy_ids` (audit that none is left
-> unprotected). Condition sets and policies take an **owner**; without one, the
-> app secret alone can edit the denylist/allowlist. In production set
-> `PRIVY_OWNER_ID` and sign owner-authorized writes with the P-256 authorization
-> key (`privy-authorization-signature`). The sample omits the owner for brevity.
+> **Allowlist, not denylist — and why.** For a fail-closed `ALLOW` rule, a `types`
+> mismatch is safe: the condition is false and the payment is denied (which the
+> payment demo's positive control would catch). For a `DENY`-based denylist (e.g.
+> OFAC-sanctioned `to` addresses) the same mismatch fails **open** — the `DENY`
+> never fires and the signature proceeds. An AgentCore Payments security review
+> observed exactly this: a Privy `DENY` on `to` declared only
+> `TransferWithAuthorization`, the signing request also carried `EIP712Domain`, and
+> the wallet signed to a sanctioned address, while a chain restriction (`chainId eq`,
+> a domain condition with no `types` map) did enforce. If you must run a denylist
+> for compliance, copy the `types` map verbatim from what your client sends,
+> validate it against every typed-data shape your app signs, pair it with `ALLOW`
+> rules scoped to the methods and chains you use, and alert on an empty or shrunken
+> condition set.
+
+> **Scope and ownership.** Privy policies are **per wallet** — every wallet must
+> carry the policy (audit that none is left unprotected). AgentCore creates a
+> **user-owned** embedded wallet and adds the app's authorization key as a signer;
+> only a wallet's owner can change its `policy_ids`, so for a user-owned wallet
+> attach the policy during delegation (Privy's guidance is to set it when the
+> wallet is created). `privy_policy_setup.py` checks the wallet's `owner_id` and
+> signs the update with the authorization key only when that key is the owner.
+> In production, also give the condition set and policy an `owner_id`, so the app
+> secret alone cannot edit the allowlist (the sample omits this for brevity).
 
 ### 3. AgentCore Payment Session — cumulative, time-bounded budget
 `create_payment_session(limits={"maxSpendAmount": {"value": "1.00", "currency": "USD"}},

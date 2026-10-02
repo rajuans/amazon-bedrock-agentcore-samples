@@ -24,7 +24,7 @@ Agent (Strands + http_request)
   ├─► 402 Payment Required
   │        AgentCorePaymentsPlugin intercepts the 402
   │        → session budget check → sign USDC tx via Privy → payment proof
-  │        → retry with X-PAYMENT header
+  │        → retry with the payment header (PAYMENT-SIGNATURE for x402 v2, X-PAYMENT for v1)
   ├─► 200 OK  (agent receives the paid content)
   └─► Agent summarizes the result
 ```
@@ -58,7 +58,7 @@ exactly what the Privy policy engine screens.
 | Recipient rule | typed-data `to` `in` allowlist | typed-data `to` `in_condition_set` |
 | Per-tx cap | typed-data `value` `<=` | typed-data `value` `lte` |
 
-This sample implements the Privy lever as a **fail-closed ALLOW rule** (approved
+This sample implements the Privy lever as **fail-closed ALLOW rules** (approved
 recipient + under cap + right chain), rather than an OFAC-style denylist. See
 [`docs/SECURITY.md`](docs/SECURITY.md) for why — a denylist on a typed-data field
 can fail *open* if its `types` schema doesn't match the request exactly, a gap an
@@ -76,9 +76,11 @@ AgentCore Payments pentest found in a Privy `to` denylist.
 ├── setup/
 │   ├── provision_stack.py        # create IAM roles + Privy credential provider + manager + connector
 │   ├── provision_payments.py     # create per-user wallet + budgeted session
+│   ├── privy_client.py           # minimal Privy REST client + P-256 request signing
 │   ├── privy_policy_setup.py     # create condition set + policy (allowlist + cap + chain), attach to wallet
+│   ├── privy_policy_probe.py     # check the attached policy signs/refuses the right typed data (no funds move)
 │   ├── privy_policy_remove.py    # detach + delete the Privy policy (cleanup)
-│   └── privy_policy_payment_demo.py # live: a Privy policy makes AgentCore ProcessPayment fail
+│   └── privy_policy_payment_demo.py # live: the policy decides whether AgentCore ProcessPayment succeeds
 ├── policies/
 │   ├── agentcore_policy.cedar    # per-tx cap + recipient allowlist (Cedar)
 │   ├── dogwood/                  # temporal policies: provenance, velocity, rolling cap (+ tests)
@@ -149,14 +151,24 @@ printed by setup (the Privy
 
 **4 — (Recommended) the Privy signing-layer policy** (recipient allowlist +
 per-tx cap + chain pin, fail-closed at signing). Creates a Privy condition set of
-approved recipients and a policy, then attaches it to the wallet by `policy_ids`:
+approved recipients and a policy, then attaches it to the wallet by `policy_ids`.
+The script reads the wallet first: it signs the update with the authorization key
+if that key owns the wallet, and stops with an explanation if the end user owns it
+(only the owner can change a wallet's policies — then attach the policy during
+delegation instead).
 
 ```bash
 # Attach the policy to the wallet backing your instrument:
 python setup/privy_policy_setup.py
 
-# Prove it end-to-end: a Privy policy makes AgentCore ProcessPayment fail, then
-# the policy is removed (cleanup). (Run on a wallet with no policy attached.)
+# Check enforcement directly: signs allowed EIP-3009 messages, refuses wrong
+# recipient / over-cap / wrong chain. Every message is already expired
+# (validBefore = 1), so no signature can move funds.
+python setup/privy_policy_probe.py
+
+# Prove it end to end through AgentCore: a decoy-only policy makes ProcessPayment
+# fail, and a merchant-allowed policy makes it succeed (positive control).
+# Restores the wallet's original policies afterwards.
 python setup/privy_policy_payment_demo.py
 
 # Remove the policy after testing:
@@ -191,11 +203,13 @@ python agent/session_budget_demo.py     # live: over-budget payment refused serv
   replay-tested locally with the `dogwood` 1.0 CLI against a copy of
   AgentCore's documented event schema: 10/10 scenarios pass. They have not yet
   been deployed to a live AgentCore Gateway in this sample.
-- **Privy signing-layer policy** (`privy_policy_setup.py` /
-  `privy_policy_payment_demo.py`) is built to Privy's documented policy API. Run
-  it against your own Privy app + AgentCore stack to confirm enforcement, and read
-  the schema-match caveat in [`docs/SECURITY.md`](docs/SECURITY.md) first — a
-  mismatched typed-data `types` map makes the condition evaluate to `false`.
+- **Privy signing-layer policy** scripts are checked offline against Privy's
+  published OpenAPI contract (request shapes, request signing, wallet
+  ownership) and a model of Privy's documented policy semantics. They have not
+  yet run against a live Privy app. Run `privy_policy_probe.py` and
+  `privy_policy_payment_demo.py` on your own stack to confirm enforcement; the
+  probe shows directly whether the policy's typed-data `types` match what your
+  signer sends (see [`docs/SECURITY.md`](docs/SECURITY.md)).
 
 ## Security notes
 

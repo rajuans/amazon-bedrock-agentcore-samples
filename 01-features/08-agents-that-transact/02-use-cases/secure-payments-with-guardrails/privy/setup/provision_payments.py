@@ -57,11 +57,9 @@ instrument = manager.create_payment_instrument(
 instrument_id = instrument["paymentInstrumentId"]
 details = instrument["paymentInstrumentDetails"]["embeddedCryptoWallet"]
 wallet_address = details["walletAddress"]
-redirect_url = instrument.get("redirectUrl") or details.get("redirectUrl")
-# Privy addresses wallets by their Privy wallet id (not the EVM address) when you
-# attach a policy. AgentCore may surface it on the instrument; otherwise look it
-# up by address with setup/privy_policy_setup.py.
-privy_wallet_id = details.get("walletId") or details.get("providerWalletId", "")
+redirect_url = details.get("redirectUrl")
+# AgentCore returns the wallet address, not Privy's internal wallet id;
+# setup/privy_policy_setup.py looks the wallet up by address.
 
 # 2) Create a budgeted, time-bounded spending session (server-enforced guardrail).
 session = manager.create_payment_session(
@@ -75,7 +73,6 @@ session_id = session["paymentSessionId"]
 write_env_values(
     INSTRUMENT_ID=instrument_id,
     WALLET_ADDRESS=wallet_address,
-    PRIVY_WALLET_ID=privy_wallet_id,
     SESSION_ID=session_id,
     PAYMENT_MANAGER_ID=PAYMENT_MANAGER_ARN.split("/")[-1],
 )
@@ -84,7 +81,6 @@ print_summary(
     "Provisioned wallet + session (written to .env)",
     instrument_id=instrument_id,
     wallet_address=wallet_address,
-    privy_wallet_id=privy_wallet_id or "(look up by address — see privy_policy_setup.py)",
     session_id=session_id,
     session_budget_usd=SESSION_BUDGET_USD,
 )
@@ -97,7 +93,7 @@ print(
     f"       {redirect_url}\n"
     "     Otherwise use the Privy AgentCore SDK frontend "
     "(https://github.com/privy-io/aws-agentcore-sdk).\n"
-    "  3. (Recommended) Attach the Privy signing-layer policy:\n"
-    "       python setup/privy_policy_setup.py\n"
+    "  3. (Recommended) Attach the Privy signing-layer policy, then verify it:\n"
+    "       python setup/privy_policy_setup.py && python setup/privy_policy_probe.py\n"
     "  4. Run the agent:  python agent/secure_payment_agent.py"
 )

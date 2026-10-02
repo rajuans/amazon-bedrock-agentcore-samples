@@ -50,7 +50,7 @@ Agent (Strands + http_request)
   ├─► 402 Payment Required
   │        AgentCorePaymentsPlugin intercepts the 402
   │        → session budget check → sign USDC tx via the wallet provider → payment proof
-  │        → retry with X-PAYMENT header
+  │        → retry with the payment header (PAYMENT-SIGNATURE for x402 v2, X-PAYMENT for v1)
   ├─► 200 OK  (agent receives the paid content)
   └─► Agent summarizes the result
 ```

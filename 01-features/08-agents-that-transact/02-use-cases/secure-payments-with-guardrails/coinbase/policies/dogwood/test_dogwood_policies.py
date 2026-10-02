@@ -57,6 +57,17 @@ DESCRIPTIONS = {
     "10_allowlisted_but_not_looked_up": "allowlisted address, but not this session's lookup",
 }
 
+# The point-in-time Cedar policy (../agentcore_policy.cedar) on the same traces.
+# It has no lookup tool permit and no history, so the lookup is denied and a
+# payment with no lookup is allowed — the gap the temporal rules close.
+CEDAR_POLICY = os.path.join(os.path.dirname(HERE), "agentcore_policy.cedar")
+CEDAR_EXPECTED = {
+    "01_happy_path":         [D, A],
+    "02_injected_recipient": [D, D],
+    "03_no_lookup":          [A],
+    "05_over_per_tx_cap":    [D, D],
+}
+
 VERDICT_RE = re.compile(r"^@\d+ \(time point \d+\): (ALLOW|DENY)")
 
 
@@ -95,7 +106,20 @@ def main():
             failures += 1
             print(f"      expected {want}\n      got      {got}\n{r.stdout}")
 
-    print(f"\n{len(EXPECTED) - failures}/{len(EXPECTED)} scenarios passed")
+    print("\nPoint-in-time Cedar policy (../agentcore_policy.cedar):")
+    v = run(cli, "validate", CEDAR_POLICY, "--policy-schema", ACTION_SCHEMA)
+    print(f"validate: {v.stdout.strip()}")
+    failures += v.returncode != 0
+    for name, want in CEDAR_EXPECTED.items():
+        trace = os.path.join(HERE, "traces", f"{name}.log")
+        r = run(cli, "replay", CEDAR_POLICY, *common, "--trace", trace)
+        got = [m.group(1) for m in map(VERDICT_RE.match, r.stdout.splitlines()) if m]
+        ok = r.returncode == 0 and got == want
+        failures += not ok
+        print(f"{'PASS' if ok else 'FAIL'}  {name:34} {' '.join(got)}")
+
+    total = len(EXPECTED) + len(CEDAR_EXPECTED) + 1
+    print(f"\n{total - failures}/{total} checks passed")
     return 1 if failures else 0
 
 

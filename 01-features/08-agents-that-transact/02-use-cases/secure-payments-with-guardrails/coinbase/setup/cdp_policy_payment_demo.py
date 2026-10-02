@@ -1,10 +1,20 @@
-"""Live proof — a Coinbase CDP policy makes AgentCore `ProcessPayment` FAIL.
+"""Live proof — a Coinbase CDP policy controls whether AgentCore `ProcessPayment` succeeds.
 
 This is the integration story (not a standalone CDP sign call): we set up a CDP
 Policy Engine rule, then drive a *real* x402 payment through AgentCore Payments
 (`generate_payment_header` → `ProcessPayment` → the CDP connector signs the
-EIP-3009 typed data). Because the policy refuses to sign, the payment fails —
-the guardrail is enforced end-to-end through the managed payment product.
+EIP-3009 typed data), under two policies:
+
+  1. NEGATIVE — a project-scoped policy that allows only a **decoy** recipient
+     (not the merchant `payTo`). The real payment's `to` matches no accept rule,
+     so the fail-secure engine refuses to sign and ProcessPayment must FAIL.
+  2. POSITIVE CONTROL — the same rule shape allowing the real merchant.
+     ProcessPayment must SUCCEED. Without this step, a rule that never matches
+     the signing request (and so denies everything) would look like a working
+     guardrail. The payment header is produced but never sent to the merchant,
+     so no USDC moves. POSITIVE_CONTROL=0 skips it.
+
+Each policy is deleted afterwards so the project is unblocked.
 
 Why a **project-scoped** policy (not account-scoped): the wallet AgentCore
 provisions is a CDP *end-user / embedded* account (signing op
@@ -13,15 +23,6 @@ in the CDP SDK — you govern their signing with a policy at the **project** sco
 which applies to every end-user signing operation in the project. (Account-scoped
 policies via `update_account` only work for CDP *server* accounts.)
 
-The rule here allowlists a **decoy** recipient (not the merchant `payTo`), so the
-real payment's `to` matches no accept rule and the fail-secure engine refuses to
-sign. Flow:
-  1. create a project-scoped CDP policy (allow only the decoy recipient),
-  2. fetch the real 402 challenge from the paid endpoint,
-  3. call `generate_payment_header` with a funded session → the CDP connector
-     tries to sign → CDP policy REJECTS → ProcessPayment fails (printed verbatim),
-  4. delete the policy (cleanup) so the project is unblocked.
-
 Requires: the provisioned stack in .env (PAYMENT_MANAGER_ARN, INSTRUMENT_ID,
 PAYMENT_CONNECTOR_ID), AWS creds, the CDP SDK, and CDP creds for the SAME project
 the connector uses, with the `policies#manage` scope.
@@ -29,12 +30,11 @@ the connector uses, with the `policies#manage` scope.
     python setup/cdp_policy_payment_demo.py
 
 Env knobs:
-    DECOY_RECIPIENT        the only allowed `to` (default 0x…dEaD, ≠ merchant)
-    SETTLE_AFTER_REMOVE    "1" to retry after cleanup and settle real USDC (off)
+    DECOY_RECIPIENT     the only allowed `to` in step 1 (default 0x…dEaD, ≠ merchant)
+    POSITIVE_CONTROL    "0" to skip step 2 (default on)
 """
 
 import asyncio
-import json
 import os
 import sys
 import uuid
@@ -44,27 +44,21 @@ import requests
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "agent"))
 
-# A recipient that is deliberately NOT the merchant payTo, so the real payment's
-# `to` field fails the allowlist and the fail-secure engine refuses to sign.
-DECOY_RECIPIENT = os.environ.get("DECOY_RECIPIENT", "0x000000000000000000000000000000000000dEaD")
-
-# Pin the rule to the decoy + the end-user signing op BEFORE importing the rule
-# builder (it reads these at import time).
-os.environ["RECIPIENT_ALLOWLIST"] = DECOY_RECIPIENT
 os.environ.setdefault("CDP_TYPED_DATA_OP", "signEndUserEvmTypedData")
 
-from cdp_policy_setup import RECIPIENT_ALLOWLIST, TYPED_DATA_OP, _build_rule  # noqa: E402
+from cdp_policy_setup import TYPED_DATA_OP, _build_rule  # noqa: E402
 from utils import client_token, load_env  # noqa: E402
 
 from bedrock_agentcore.payments import PaymentManager  # noqa: E402
 
 PAID_ENDPOINT = os.environ.get("PAID_ENDPOINT", "https://x402-test.genesisblock.ai/api/weather")
-SETTLE_AFTER_REMOVE = os.environ.get("SETTLE_AFTER_REMOVE", "0") == "1"
+DECOY_RECIPIENT = os.environ.get("DECOY_RECIPIENT", "0x000000000000000000000000000000000000dEaD")
+POSITIVE_CONTROL = os.environ.get("POSITIVE_CONTROL", "1") != "0"
 
 
 def _fetch_402() -> dict:
     r = requests.get(PAID_ENDPOINT, timeout=30)
-    print(f"GET {PAID_ENDPOINT} -> {r.status_code}")
+    print(f"  GET {PAID_ENDPOINT} -> {r.status_code}")
     if r.status_code != 402:
         raise SystemExit(f"Expected HTTP 402 from the paid endpoint; got {r.status_code}")
     try:
@@ -74,25 +68,38 @@ def _fetch_402() -> dict:
     return {"statusCode": r.status_code, "headers": dict(r.headers), "body": body}
 
 
-def _try_pay(mgr, c, session_id, label) -> bool:
-    """Attempt to settle the 402 via AgentCore. Returns True if a header was
-    produced (payment would settle), False if it was rejected."""
+def _merchant_pay_to() -> str:
+    accepts = _fetch_402()["body"].get("accepts") or []
+    evm = [a for a in accepts if str(a.get("network", "")).startswith("eip155")]
+    if not evm:
+        raise SystemExit("The 402 challenge has no EVM option.")
+    return evm[0]["payTo"]
+
+
+def _try_pay(mgr, c, label) -> bool:
+    """Attempt to settle the 402 via AgentCore in a fresh session. True if a
+    payment header was produced, False if ProcessPayment was refused."""
     print(f"\n{label}")
+    session = mgr.create_payment_session(
+        user_id=c["user_id"],
+        limits={"maxSpendAmount": {"value": c["session_budget_usd"], "currency": "USD"}},
+        expiry_time_in_minutes=15,
+        client_token=client_token(),
+    )
     try:
         mgr.generate_payment_header(
             user_id=c["user_id"],
             payment_instrument_id=c["instrument_id"],
-            payment_session_id=session_id,
+            payment_session_id=session["paymentSessionId"],
             payment_required_request=_fetch_402(),
             network_preferences=["eip155:84532", "base-sepolia"],
             client_token=str(uuid.uuid4()),
             payment_connector_id=c["payment_connector_id"],
         )
-        print("  -> ProcessPayment produced a payment header (payment would settle).")
+        print("  -> ProcessPayment produced a payment header.")
         return True
     except Exception as e:  # noqa: BLE001 - surface the service's verbatim reason
-        print("  -> ProcessPayment FAILED (guardrail fired):")
-        print(f"     {type(e).__name__}: {e}")
+        print(f"  -> ProcessPayment FAILED: {type(e).__name__}: {e}")
         return False
 
 
@@ -110,6 +117,7 @@ async def main() -> int:
         "api_key_secret": os.environ.get("COINBASE_API_KEY_SECRET") or os.environ.get("CDP_API_KEY_SECRET"),
         "wallet_secret": os.environ.get("COINBASE_WALLET_SECRET") or os.environ.get("CDP_WALLET_SECRET"),
     }
+    merchant = _merchant_pay_to()
     async with CdpClient(**cdp_kwargs) as cdp:
         # Guard: don't clobber an existing project policy the user may rely on.
         existing = await cdp.policies.list_policies(scope="project")
@@ -120,52 +128,41 @@ async def main() -> int:
                 "conflict with it; remove or reuse it before running."
             )
 
-        policy = await cdp.policies.create_policy(
-            policy=CreatePolicyOptions(
-                scope="project",
-                description="DEMO block payment recipient not allowlisted",
-                rules=[_build_rule()],
+        async def run_with_policy(allowed, label) -> bool:
+            policy = await cdp.policies.create_policy(
+                policy=CreatePolicyOptions(
+                    scope="project",
+                    description="DEMO x402 recipient allowlist",
+                    rules=[_build_rule([allowed])],
+                )
             )
-        )
-        print(f"Created project-scoped CDP policy {policy.id}")
-        print(f"  operation:      {TYPED_DATA_OP}")
-        print(f"  allowed `to` in {RECIPIENT_ALLOWLIST}  (decoy — NOT the merchant)")
-
-        # A normally-funded session, so we clear the budget check and reach the
-        # CDP signing step where the policy actually fires.
-        session = mgr.create_payment_session(
-            user_id=c["user_id"],
-            limits={"maxSpendAmount": {"value": c["session_budget_usd"], "currency": "USD"}},
-            expiry_time_in_minutes=15,
-            client_token=client_token(),
-        )
-        sid = session["paymentSessionId"]
-        print(f"Payment session {sid} (budget {c['session_budget_usd']} USD — above the price)")
+            print(f"\nCreated project-scoped CDP policy {policy.id} "
+                  f"({TYPED_DATA_OP}, allow `to` in [{allowed}])")
+            try:
+                return _try_pay(mgr, c, label)
+            finally:
+                await cdp.policies.delete_policy(id=policy.id)
+                print(f"  Cleanup: deleted project policy {policy.id}")
 
         rc = 0
-        try:
-            settled = _try_pay(
-                mgr, c, sid,
-                "Attempt 1 — pay the merchant WITH the CDP policy active:",
-            )
-            if settled:
-                print("\nUNEXPECTED: the policy did not block signing.")
-                rc = 1
+        if await run_with_policy(DECOY_RECIPIENT,
+                                 f"1) NEGATIVE — pay merchant {merchant}; only the decoy is allowed:"):
+            print("  FAIL: the policy did not block signing.")
+            rc = 1
+        else:
+            print("  OK: the CDP Policy Engine refused to sign, so ProcessPayment failed.")
+
+        if POSITIVE_CONTROL and rc == 0:
+            if await run_with_policy(merchant,
+                                     f"2) POSITIVE CONTROL — pay merchant {merchant}; merchant allowed:"):
+                print("  OK: the same rule shape signs an allowed payment, so step 1 was a real "
+                      "policy decision, not a blanket deny.")
             else:
-                print("\n✅ The CDP Policy Engine refused to sign, so AgentCore ProcessPayment "
-                      "failed — the guardrail held at the wallet layer.")
-        finally:
-            await cdp.policies.delete_policy(id=policy.id)
-            print(f"\nCleanup: deleted project policy {policy.id}")
+                print("  FAIL: the allowed payment was refused too — the rule is denying every "
+                      "payment (check the typed-data types and operation), or funding/delegation.")
+                rc = 1
 
-        if rc == 0 and SETTLE_AFTER_REMOVE:
-            # Contrast: same call, policy gone → it now settles real testnet USDC.
-            settled = _try_pay(
-                mgr, c, sid,
-                "Attempt 2 — same payment AFTER removing the policy (settles real USDC):",
-            )
-            print("  (settled)" if settled else "  (still failed — check funding/delegation)")
-
+    print("\n✅ CDP policy enforcement confirmed end to end." if rc == 0 else "\n❌ Demo failed.")
     return rc
 
 

@@ -10,6 +10,9 @@ bedrock-agentcore>=1.22.0
 strands-agents>=1.53.0
 strands-agents-tools>=0.2.0
 
+# Privy REST policy scripts: P-256 request signing (setup/privy_client.py)
+cryptography>=42.0
+
 # Utilities (requests also drives the Privy REST policy setup in setup/privy_policy_*.py)
 python-dotenv>=1.0.0
 requests>=2.31.0

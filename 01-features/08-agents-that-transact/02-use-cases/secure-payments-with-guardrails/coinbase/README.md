@@ -20,7 +20,7 @@ Agent (Strands + http_request)
   ├─► 402 Payment Required
   │        AgentCorePaymentsPlugin intercepts the 402
   │        → session budget check → sign USDC tx via Coinbase CDP → payment proof
-  │        → retry with X-PAYMENT header
+  │        → retry with the payment header (PAYMENT-SIGNATURE for x402 v2, X-PAYMENT for v1)
   ├─► 200 OK  (agent receives the paid content)
   └─► Agent summarizes the result
 ```
@@ -52,7 +52,7 @@ Agent (Strands + http_request)
 │   ├── provision_payments.py     # create per-user wallet + budgeted session
 │   ├── cdp_policy_setup.py       # attach CDP typed-data policy (recipient + cap)
 │   ├── cdp_policy_remove.py      # detach + delete the CDP policy (cleanup)
-│   └── cdp_policy_payment_demo.py # live: a CDP policy makes AgentCore ProcessPayment fail
+│   └── cdp_policy_payment_demo.py # live: the CDP policy decides whether AgentCore ProcessPayment succeeds
 ├── policies/
 │   ├── agentcore_policy.cedar    # per-tx cap + recipient allowlist (Cedar)
 │   ├── dogwood/                  # temporal policies: provenance, velocity, rolling cap (+ tests)
@@ -125,8 +125,10 @@ signing is governed by a **project-scoped** policy; CDP *server* accounts use an
 account-scoped policy attached with `cdp_policy_setup.py`.
 
 ```bash
-# Prove it end-to-end: a CDP policy makes AgentCore ProcessPayment fail, then
-# the policy is removed (cleanup):
+# Prove it end to end through AgentCore: a decoy-only project policy makes
+# ProcessPayment fail, and a merchant-allowed policy makes it succeed (positive
+# control — shows the rule really matches, rather than denying everything).
+# Each policy is deleted afterwards:
 python setup/cdp_policy_payment_demo.py
 
 # Server-account variant (attach/detach an account-scoped policy):
@@ -164,6 +166,11 @@ This sample has been run end-to-end against the provisioned stack:
   `InsufficientBudget` (`Pending amount: 0.0001 USD, Transaction amount: 0.001000 USD`);
   the budget was never touched. No LLM narration involved — the rejection is the
   raised exception.
+- **CDP signing-layer policy** — `cdp_policy_payment_demo.py` now runs a negative
+  step (decoy-only policy, ProcessPayment must fail) **and** a positive control
+  (merchant-allowed policy, ProcessPayment must succeed). The updated demo is
+  checked offline; run it against your stack to confirm the rule matches the
+  signing request rather than denying everything.
 - **Dogwood temporal policies** (`policies/dogwood/`) are validated and
   replay-tested locally with the `dogwood` 1.0 CLI against a copy of
   AgentCore's documented event schema: 10/10 scenarios pass. They have not yet

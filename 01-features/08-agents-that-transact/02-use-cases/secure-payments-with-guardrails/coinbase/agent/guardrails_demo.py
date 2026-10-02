@@ -56,7 +56,7 @@ def evaluate_guardrails(recipient: str, amount_usd: float) -> Decision:
         return Decision(
             False,
             f"amount ${amount_usd:.2f} exceeds per-transaction cap ${PER_TX_CAP_USD:.2f}",
-            "AgentCore Policy (Cedar forbid on context.amount_usd)",
+            "AgentCore Policy (Cedar forbid on context.input.amount)",
         )
     return Decision(True, "within per-tx cap and recipient allowlisted", "—")
 

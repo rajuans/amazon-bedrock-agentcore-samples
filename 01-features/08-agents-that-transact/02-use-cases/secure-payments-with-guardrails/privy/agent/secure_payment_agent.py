@@ -3,7 +3,7 @@
 The agent fetches a paid (x402-gated) resource. When the endpoint replies with
 HTTP 402 Payment Required, the AgentCorePaymentsPlugin transparently:
     intercept 402 -> check session budget -> sign USDC tx via Privy
-    -> retry with X-PAYMENT header -> return the 200 body to the agent.
+    -> retry with the payment header (PAYMENT-SIGNATURE for x402 v2) -> return the 200 body.
 
 Payment settles in USDC on Base Sepolia. The spend is bounded by a server-side
 AgentCore Payment Session (`maxSpendAmount`); the agent role cannot raise its

@@ -1,12 +1,134 @@
 {
-  "__comment": "Privy policy engine — signing-layer backstop (the Stripe/Privy analogue of Coinbase CDP's policy). Privy policies are attached per-wallet via the wallet's policy_ids, and are FAIL-CLOSED: within a method, a signing request that matches no ALLOW rule is denied, and an unlisted method defaults to DENY. x402's EVM 'exact' scheme signs an EIP-3009 TransferWithAuthorization as EIP-712 typed data via eth_signTypedData_v4, so the rule matches the typed-data message fields: 'to' as a recipient allowlist (operator in_condition_set, referencing a condition set of approved payTo addresses) and 'value' as a per-transaction cap (operator lte, USDC base units with 6 decimals), plus the domain chainId to pin the chain (Base Sepolia 84532). CRITICAL: the 'types' map below must match the signing request's typed data EXACTLY — if it does not, the condition evaluates to FALSE (it does not skip). For a fail-closed ALLOW rule a mismatch simply denies the payment (safe); for a DENY-based denylist a mismatch would let the request through (unsafe). This is the failure observed in the AgentCore Payments pentest (OFAC denylist on 'to' did not fire). Prefer this ALLOW-allowlist shape over a denylist. Matching is also case-sensitive, so include both the lowercase and checksummed casing of every address in the condition set. Docs: https://docs.privy.io/controls/policies",
+  "__comment": "Privy policy \u2014 signing-layer backstop (the Stripe/Privy analogue of Coinbase CDP's policy), as created by setup/privy_policy_setup.py. Attached per wallet via policy_ids. Within a method, a request that matches no ALLOW rule is denied, and an unlisted method defaults to DENY. x402 signs an EIP-3009 TransferWithAuthorization as EIP-712 typed data via eth_signTypedData_v4; each ALLOW rule requires domain chainId == 84532, message `to` in the approved-recipients condition set, and message `value` <= 0x7a120 (500000 base units = $0.50 USDC). CRITICAL: Privy evaluates a typed-data message condition only when the rule's `types` map matches the signing request's `types` EXACTLY, including whether EIP712Domain is declared and the field order; on a mismatch the condition is false. Clients differ on whether they send EIP712Domain, so the policy has one rule per shape. For these ALLOW rules a mismatch denies the payment (fail-closed); for a DENY rule it would let the request through (fail-open), which is why this sample uses an allowlist. Verify which shape your signer sends with setup/privy_policy_probe.py. Docs: https://docs.privy.io/controls/policies/overview",
   "version": "1.0",
   "name": "x402 recipient allowlist and per-tx cap",
   "chain_type": "ethereum",
-  "owner_id": "<optional-owner-id — set in production so the app secret alone cannot edit the policy>",
   "rules": [
     {
-      "name": "Allow x402 USDC transfer to an approved recipient under the cap on Base Sepolia",
+      "name": "Allow x402 USDC to an approved recipient under the cap (with EIP712Domain)",
+      "method": "eth_signTypedData_v4",
+      "action": "ALLOW",
+      "conditions": [
+        {
+          "field_source": "ethereum_typed_data_domain",
+          "field": "chainId",
+          "operator": "eq",
+          "value": "84532"
+        },
+        {
+          "field_source": "ethereum_typed_data_message",
+          "field": "to",
+          "operator": "in_condition_set",
+          "value": "<APPROVED_RECIPIENTS_CONDITION_SET_ID>",
+          "typed_data": {
+            "types": {
+              "EIP712Domain": [
+                {
+                  "name": "name",
+                  "type": "string"
+                },
+                {
+                  "name": "version",
+                  "type": "string"
+                },
+                {
+                  "name": "chainId",
+                  "type": "uint256"
+                },
+                {
+                  "name": "verifyingContract",
+                  "type": "address"
+                }
+              ],
+              "TransferWithAuthorization": [
+                {
+                  "name": "from",
+                  "type": "address"
+                },
+                {
+                  "name": "to",
+                  "type": "address"
+                },
+                {
+                  "name": "value",
+                  "type": "uint256"
+                },
+                {
+                  "name": "validAfter",
+                  "type": "uint256"
+                },
+                {
+                  "name": "validBefore",
+                  "type": "uint256"
+                },
+                {
+                  "name": "nonce",
+                  "type": "bytes32"
+                }
+              ]
+            },
+            "primary_type": "TransferWithAuthorization"
+          }
+        },
+        {
+          "field_source": "ethereum_typed_data_message",
+          "field": "value",
+          "operator": "lte",
+          "value": "0x7a120",
+          "typed_data": {
+            "types": {
+              "EIP712Domain": [
+                {
+                  "name": "name",
+                  "type": "string"
+                },
+                {
+                  "name": "version",
+                  "type": "string"
+                },
+                {
+                  "name": "chainId",
+                  "type": "uint256"
+                },
+                {
+                  "name": "verifyingContract",
+                  "type": "address"
+                }
+              ],
+              "TransferWithAuthorization": [
+                {
+                  "name": "from",
+                  "type": "address"
+                },
+                {
+                  "name": "to",
+                  "type": "address"
+                },
+                {
+                  "name": "value",
+                  "type": "uint256"
+                },
+                {
+                  "name": "validAfter",
+                  "type": "uint256"
+                },
+                {
+                  "name": "validBefore",
+                  "type": "uint256"
+                },
+                {
+                  "name": "nonce",
+                  "type": "bytes32"
+                }
+              ]
+            },
+            "primary_type": "TransferWithAuthorization"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Allow x402 USDC to an approved recipient under the cap (without EIP712Domain)",
       "method": "eth_signTypedData_v4",
       "action": "ALLOW",
       "conditions": [
@@ -24,12 +146,30 @@
           "typed_data": {
             "types": {
               "TransferWithAuthorization": [
-                { "name": "from", "type": "address" },
-                { "name": "to", "type": "address" },
-                { "name": "value", "type": "uint256" },
-                { "name": "validAfter", "type": "uint256" },
-                { "name": "validBefore", "type": "uint256" },
-                { "name": "nonce", "type": "bytes32" }
+                {
+                  "name": "from",
+                  "type": "address"
+                },
+                {
+                  "name": "to",
+                  "type": "address"
+                },
+                {
+                  "name": "value",
+                  "type": "uint256"
+                },
+                {
+                  "name": "validAfter",
+                  "type": "uint256"
+                },
+                {
+                  "name": "validBefore",
+                  "type": "uint256"
+                },
+                {
+                  "name": "nonce",
+                  "type": "bytes32"
+                }
               ]
             },
             "primary_type": "TransferWithAuthorization"
@@ -43,12 +183,30 @@
           "typed_data": {
             "types": {
               "TransferWithAuthorization": [
-                { "name": "from", "type": "address" },
-                { "name": "to", "type": "address" },
-                { "name": "value", "type": "uint256" },
-                { "name": "validAfter", "type": "uint256" },
-                { "name": "validBefore", "type": "uint256" },
-                { "name": "nonce", "type": "bytes32" }
+                {
+                  "name": "from",
+                  "type": "address"
+                },
+                {
+                  "name": "to",
+                  "type": "address"
+                },
+                {
+                  "name": "value",
+                  "type": "uint256"
+                },
+                {
+                  "name": "validAfter",
+                  "type": "uint256"
+                },
+                {
+                  "name": "validBefore",
+                  "type": "uint256"
+                },
+                {
+                  "name": "nonce",
+                  "type": "bytes32"
+                }
               ]
             },
             "primary_type": "TransferWithAuthorization"

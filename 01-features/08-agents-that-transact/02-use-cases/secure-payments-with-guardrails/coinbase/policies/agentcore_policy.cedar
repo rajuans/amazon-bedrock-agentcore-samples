@@ -8,35 +8,42 @@
 // expressible by an AgentCore Payment Session (which only caps cumulative
 // spend). Docs: https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/policy.html
 //
-// Model here: the payment capability is exposed as a Gateway tool action
-// `Action::"pay_merchant"` taking context attributes `amount_usd` (decimal)
-// and `recipient` (string, lowercased 0x address). Adjust the principal /
-// resource identifiers to match your Gateway + workload identity.
+// The payment tool is exposed through the Gateway as
+// `PaymentsTarget___pay_merchant` (<TargetName>___<tool-name>), with inputs
+// `amount` (Long, USDC base units: 500000 = $0.50) and `recipient` (String,
+// lowercase x402 payTo). Replace the Gateway ARN with your own.
+//
+// Validated with:  dogwood validate agentcore_policy.cedar \
+//                    --policy-schema dogwood/schema.cedarschema
+// For rules over the agent's history (velocity, rolling cap, recipient
+// provenance), see dogwood/payment_guardrails.dw — it replaces rule 1 below.
 
 // 1) Baseline: allow the agent to call the payment tool.
+@id("permit_pay_merchant")
 permit (
     principal,
-    action == Action::"pay_merchant",
-    resource
+    action == AgentCore::Action::"PaymentsTarget___pay_merchant",
+    resource == AgentCore::Gateway::"arn:aws:bedrock-agentcore:us-west-2:123456789012:gateway/payments-gateway"
 );
 
 // 2) Forbid any single payment above the per-transaction cap ($0.50).
 //    Overrides the permit above — in Cedar, an explicit `forbid` always wins.
+@id("forbid_over_per_tx_cap")
 forbid (
     principal,
-    action == Action::"pay_merchant",
-    resource
+    action == AgentCore::Action::"PaymentsTarget___pay_merchant",
+    resource == AgentCore::Gateway::"arn:aws:bedrock-agentcore:us-west-2:123456789012:gateway/payments-gateway"
 )
-when { context.amount_usd > decimal("0.50") };
+when { context.input.amount > 500000 };
 
 // 3) Forbid payments to any recipient not on the allowlist.
+@id("forbid_recipient_not_allowlisted")
 forbid (
     principal,
-    action == Action::"pay_merchant",
-    resource
+    action == AgentCore::Action::"PaymentsTarget___pay_merchant",
+    resource == AgentCore::Gateway::"arn:aws:bedrock-agentcore:us-west-2:123456789012:gateway/payments-gateway"
 )
 unless {
-    context.recipient in [
-        "0xa27f7cb624b57c79d7f9de03ae9f5c705c2858db"   // allowlisted merchant payTo (x402), not the USDC contract
-    ]
+    ["0xa27f7cb624b57c79d7f9de03ae9f5c705c2858db"]   // allowlisted merchant payTo (x402), not the USDC contract
+        .contains(context.input.recipient)
 };
