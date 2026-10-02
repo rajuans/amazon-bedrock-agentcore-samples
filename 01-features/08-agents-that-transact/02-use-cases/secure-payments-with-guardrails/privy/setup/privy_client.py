@@ -138,6 +138,17 @@ class PrivyClient:
         return self._req("POST", f"/v1/condition_sets/{set_id}/condition_set_items",
                          body=[{"value": v} for v in values])
 
+    def replace_condition_set_items(self, set_id, addresses):
+        """Replace the whole condition set (PUT). The policy that references the
+        set changes behavior immediately — no policy or wallet update needed."""
+        values = list(dict.fromkeys(v for a in addresses for v in (a, a.lower())))
+        return self._req("PUT", f"/v1/condition_sets/{set_id}/condition_set_items",
+                         body=[{"value": v} for v in values])
+
+    def get_condition_set_items(self, set_id):
+        return [i["value"] for i in
+                self._req("GET", f"/v1/condition_sets/{set_id}/condition_set_items").get("items", [])]
+
     def delete_condition_set(self, set_id):
         return self._req("DELETE", f"/v1/condition_sets/{set_id}")
 
@@ -149,6 +160,16 @@ class PrivyClient:
 
     def delete_policy(self, policy_id):
         return self._req("DELETE", f"/v1/policies/{policy_id}")
+
+
+def governing_policy_ids(wallet: dict, authorization_id: str):
+    """Policies that govern signing by the AgentCore authorization key: the
+    signer's `override_policy_ids` when it has any, else the wallet's
+    `policy_ids`."""
+    for s in wallet.get("additional_signers") or []:
+        if s.get("signer_id") == authorization_id and s.get("override_policy_ids"):
+            return list(s["override_policy_ids"])
+    return list(wallet.get("policy_ids") or [])
 
 
 def wallet_update_mode(wallet: dict, authorization_id: str):

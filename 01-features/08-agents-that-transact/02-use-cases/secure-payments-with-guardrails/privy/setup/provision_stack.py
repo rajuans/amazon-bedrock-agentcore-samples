@@ -272,27 +272,37 @@ def main():
         credentialProviderVendor=CREDENTIAL_PROVIDER_TYPE,
         providerConfigurationInput=_provider_config(),
     )
-    if provider is None:
-        cred_arn = require_env("CREDENTIAL_PROVIDER_ARN")  # reuse from a prior run
+    if provider is None:  # exists from a prior run — look it up by name
+        cred_arn = cp.get_payment_credential_provider(name=CRED_PROVIDER_NAME)["credentialProviderArn"]
     else:
         cred_arn = provider["credentialProviderArn"]
     print(f"   credentialProviderArn: {cred_arn}")
 
     print("\n3) Payment manager (authorizer AWS_IAM):")
-    manager = idempotent_create(
-        cp.create_payment_manager,
-        conflict_msg=f"payment manager {MANAGER_NAME} exists",
-        name=MANAGER_NAME,
-        description=f"{MANAGER_NAME} secure payment agent",
-        authorizerType="AWS_IAM",
-        roleArn=roles["RESOURCE_RETRIEVAL_ROLE_ARN"],
-        clientToken=client_token(),
-    )
-    if manager is None:
-        manager_arn = require_env("PAYMENT_MANAGER_ARN")
-        manager_id = manager_arn.split("/")[-1]
+    # Reuse an existing manager when PAYMENT_MANAGER_ARN is preset (for example,
+    # when the account is at its payment-manager quota). A manager can hold
+    # connectors for several providers.
+    preset_arn = os.environ.get("PAYMENT_MANAGER_ARN", "").strip()
+    if preset_arn and not preset_arn.startswith("<"):
+        manager_id = preset_arn.split("/")[-1]
+        manager_arn = cp.get_payment_manager(paymentManagerId=manager_id)["paymentManagerArn"]
+        print(f"   reusing existing manager {manager_id} (PAYMENT_MANAGER_ARN is set)")
+        manager = None
     else:
-        manager_arn, manager_id = manager["paymentManagerArn"], manager["paymentManagerId"]
+        manager = idempotent_create(
+            cp.create_payment_manager,
+            conflict_msg=f"payment manager {MANAGER_NAME} exists",
+            name=MANAGER_NAME,
+            description=f"{MANAGER_NAME} secure payment agent",
+            authorizerType="AWS_IAM",
+            roleArn=roles["RESOURCE_RETRIEVAL_ROLE_ARN"],
+            clientToken=client_token(),
+        )
+        if manager is None:
+            manager_arn = require_env("PAYMENT_MANAGER_ARN")
+            manager_id = manager_arn.split("/")[-1]
+        else:
+            manager_arn, manager_id = manager["paymentManagerArn"], manager["paymentManagerId"]
     print(f"   paymentManagerId: {manager_id}")
     wait_for_status(cp.get_payment_manager, "READY", paymentManagerId=manager_id)
     print("   manager READY")
@@ -316,8 +326,10 @@ def main():
         credentialProviderConfigurations=[{"stripePrivy": {"credentialProviderArn": cred_arn}}],
         clientToken=client_token(),
     )
-    if connector is None:
-        connector_id = require_env("PAYMENT_CONNECTOR_ID")
+    if connector is None:  # exists from a prior run — look it up by name
+        existing = cp.list_payment_connectors(paymentManagerId=manager_id).get("paymentConnectors", [])
+        match = [c for c in existing if c.get("name") == CONNECTOR_NAME]
+        connector_id = match[0]["paymentConnectorId"] if match else require_env("PAYMENT_CONNECTOR_ID")
     else:
         connector_id = connector["paymentConnectorId"]
     print(f"   paymentConnectorId: {connector_id}")

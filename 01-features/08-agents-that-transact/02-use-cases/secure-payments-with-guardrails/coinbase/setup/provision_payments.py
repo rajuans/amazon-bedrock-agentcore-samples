@@ -50,8 +50,9 @@ instrument = manager.create_payment_instrument(
     client_token=client_token(),
 )
 instrument_id = instrument["paymentInstrumentId"]
-wallet_address = instrument["paymentInstrumentDetails"]["embeddedCryptoWallet"]["walletAddress"]
-redirect_url = instrument.get("redirectUrl")
+details = instrument["paymentInstrumentDetails"]["embeddedCryptoWallet"]
+wallet_address = details["walletAddress"]
+redirect_url = details.get("redirectUrl")  # Coinbase WalletHub link for funding + delegation
 
 # 2) Create a budgeted, time-bounded spending session (server-enforced guardrail).
 session = manager.create_payment_session(

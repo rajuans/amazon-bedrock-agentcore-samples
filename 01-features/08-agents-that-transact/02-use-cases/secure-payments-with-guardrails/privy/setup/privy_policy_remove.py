@@ -21,7 +21,7 @@ from utils import ENV_FILE, require_env, write_env_values
 
 load_dotenv(ENV_FILE, override=True)
 
-from privy_client import PrivyClient, PrivyError, wallet_update_mode  # noqa: E402
+from privy_client import PrivyClient, PrivyError, governing_policy_ids, wallet_update_mode  # noqa: E402
 
 
 def main(wallet_id=None, policy_id=None):
@@ -29,12 +29,21 @@ def main(wallet_id=None, policy_id=None):
     wallet = privy.get_wallet(wallet_id or require_env("PRIVY_WALLET_ID"))
     policy_id = policy_id or require_env("PRIVY_POLICY_ID")
 
-    signed, problem = wallet_update_mode(wallet, os.environ.get("PRIVY_AUTHORIZATION_ID", "").strip())
-    if problem:
-        raise SystemExit(f"Cannot detach the policy: {problem}")
-    remaining = [p for p in wallet.get("policy_ids") or [] if p != policy_id]
-    privy.update_wallet(wallet["id"], {"policy_ids": remaining}, signed=signed)
-    print(f"Detached policy {policy_id} from wallet {wallet['id']} (remaining: {remaining})")
+    auth_id = os.environ.get("PRIVY_AUTHORIZATION_ID", "").strip()
+    signed, problem = wallet_update_mode(wallet, auth_id)
+    if policy_id in (wallet.get("policy_ids") or []):
+        if problem:
+            raise SystemExit(f"Cannot detach the policy: {problem}")
+        remaining = [p for p in wallet["policy_ids"] if p != policy_id]
+        privy.update_wallet(wallet["id"], {"policy_ids": remaining}, signed=signed)
+        print(f"Detached policy {policy_id} from wallet {wallet['id']} (remaining: {remaining})")
+    elif policy_id in governing_policy_ids(wallet, auth_id):
+        # Set as the agent signer's policy at delegation; only the wallet's user can
+        # change that. Deleting it underneath the signer would break the agent's signing.
+        raise SystemExit(
+            f"Policy {policy_id} is the agent signer's policy, set when the user delegated. "
+            "Have the user remove the agent (or re-delegate without the policy) in the "
+            "Privy AgentCore SDK frontend, then run this script again to delete it.")
 
     privy.delete_policy(policy_id)
     print(f"Deleted policy {policy_id}")

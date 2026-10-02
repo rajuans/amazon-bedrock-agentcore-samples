@@ -22,12 +22,16 @@ the condition is false. For this ALLOW-only policy a mismatch denies the payment
 policy carries two otherwise-identical ALLOW rules, one per shape. Run
 `setup/privy_policy_probe.py` to see which shape your wallet's signer accepts.
 
-Wallet ownership. AgentCore creates a user-owned Privy embedded wallet and adds
-the app's authorization key as a signer. This script reads the wallet first:
-  - no owner                          -> update with the app secret,
-  - owned by this authorization key   -> update with a signed request,
-  - owned by someone else (the user)  -> stop and explain (the app cannot
-                                         change a user-owned wallet's policies).
+Wallet ownership. AgentCore creates a USER-OWNED Privy embedded wallet; the
+user's delegation adds the app's authorization key as a signer. Only the owner
+can change a wallet's policies, so this script reads the wallet first:
+  - no owner, or owned by this authorization key -> attach the policy to the
+    wallet's `policy_ids` (signed with the key when it is the owner);
+  - owned by the user (the AgentCore case)       -> create the policy but do not
+    attach it; print its id. The user attaches it when delegating: in the Privy
+    AgentCore SDK frontend, the "Connect agent" step calls
+        addSessionSigners({ signers: [{ signerId, policyIds: ["<policy id>"] }] })
+    which sets the policy as the agent signer's override policy.
 
     python setup/privy_policy_setup.py              # wallet found by WALLET_ADDRESS
     python setup/privy_policy_setup.py <wallet_id>
@@ -52,7 +56,9 @@ from utils import ENV_FILE, require_env, write_env_values
 
 load_dotenv(ENV_FILE, override=True)
 
-from privy_client import PrivyClient, PrivyError, eip3009_typed_data, wallet_update_mode  # noqa: E402
+from privy_client import (  # noqa: E402
+    PrivyClient, PrivyError, eip3009_typed_data, governing_policy_ids, wallet_update_mode,
+)
 
 CHAIN_ID = os.environ.get("CHAIN_ID", "84532")
 
@@ -77,8 +83,8 @@ def build_allowlist_rules(condition_set_id, cap_hex=PER_TX_CAP_HEX, chain_id=CHA
     for with_domain in (True, False):
         td = eip3009_typed_data(with_domain)
         rules.append({
-            "name": f"Allow x402 USDC to an approved recipient under the cap"
-                    f" ({'with' if with_domain else 'without'} EIP712Domain)",
+            # Privy rule names must be fewer than 50 characters.
+            "name": f"x402 USDC allowlist + cap ({'with' if with_domain else 'no'} EIP712Domain)",
             "method": "eth_signTypedData_v4",
             "action": "ALLOW",
             "conditions": [
@@ -118,37 +124,49 @@ def describe_wallet(wallet):
               "wallet — delegation may not be complete.")
 
 
-def attach_policy(privy, wallet, policy_id):
-    signed, problem = wallet_update_mode(wallet, os.environ.get("PRIVY_AUTHORIZATION_ID", "").strip())
-    if problem:
-        raise SystemExit(f"Cannot attach the policy: {problem}")
-    current = wallet.get("policy_ids") or []
-    privy.update_wallet(wallet["id"], {"policy_ids": list(dict.fromkeys([*current, policy_id]))},
-                        signed=signed)
-    return signed
-
-
 def main(wallet_id_arg=None):
     privy = PrivyClient.from_env()
+    auth_id = os.environ.get("PRIVY_AUTHORIZATION_ID", "").strip()
     wallet = resolve_wallet(privy, wallet_id_arg)
     describe_wallet(wallet)
+    signed, problem = wallet_update_mode(wallet, auth_id)
 
     set_id = privy.create_condition_set("x402 approved recipients")
     privy.add_condition_set_items(set_id, RECIPIENT_ALLOWLIST)
     print(f"\nCreated approved-recipients condition set {set_id}: {RECIPIENT_ALLOWLIST}")
-
-    policy_id = privy.create_policy("x402 recipient allowlist and per-tx cap",
-                                    build_allowlist_rules(set_id))
-    print(f"Created policy {policy_id}")
-
     try:
-        signed = attach_policy(privy, wallet, policy_id)
-    except (SystemExit, PrivyError):
-        privy.delete_policy(policy_id)  # don't leave an orphaned policy behind
+        policy_id = privy.create_policy("x402 recipient allowlist and per-tx cap",
+                                        build_allowlist_rules(set_id))
+    except PrivyError:
+        privy.delete_condition_set(set_id)  # don't leave an orphaned condition set behind
         raise
-
+    print(f"Created policy {policy_id}")
     write_env_values(PRIVY_WALLET_ID=wallet["id"], PRIVY_CONDITION_SET_ID=set_id,
                      PRIVY_POLICY_ID=policy_id)
+
+    if problem:  # user-owned wallet: the user attaches the policy at delegation
+        print(f"\nThe wallet is owned by {wallet.get('owner_id')}, so this app cannot attach "
+              "the policy itself. Attach it when the user delegates signing to the agent:")
+        print("  Privy AgentCore SDK frontend (https://github.com/privy-io/aws-agentcore-sdk),")
+        print("  src/components/modals/connect-agent-modal.tsx — change")
+        print("      signers: [{ signerId, policyIds: [] }]")
+        print("  to")
+        print(f'      signers: [{{ signerId, policyIds: ["{policy_id}"] }}]')
+        print(f"  (signerId = NEXT_PUBLIC_PRIVY_SIGNER_ID = {auth_id}), then log in as the wallet's")
+        print("  user and choose Connect agent.")
+        if policy_id in governing_policy_ids(wallet, auth_id):
+            print("\nThe policy already governs the agent signer.")
+        print("\nAfter delegation, verify:  python setup/privy_policy_probe.py")
+        return
+
+    current = wallet.get("policy_ids") or []
+    try:
+        privy.update_wallet(wallet["id"], {"policy_ids": list(dict.fromkeys([*current, policy_id]))},
+                            signed=signed)
+    except PrivyError:
+        privy.delete_policy(policy_id)  # don't leave an orphaned policy behind
+        privy.delete_condition_set(set_id)
+        raise
     print(f"\nAttached policy {policy_id} to wallet {wallet['id']}"
           f"{' (signed with the authorization key)' if signed else ''}")
     print("  method:          eth_signTypedData_v4 (unmatched => DENY)")

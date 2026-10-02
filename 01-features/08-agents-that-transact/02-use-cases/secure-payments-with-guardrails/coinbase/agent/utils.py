@@ -55,14 +55,20 @@ def idempotent_create(create_fn, conflict_msg: str = "already exists", **kwargs)
     """Call a control-plane create_* API, tolerating a re-run.
 
     Returns the API response, or None if the resource already existed
-    (``ConflictException``). Any other error propagates.
+    (``ConflictException``, or ``ValidationException`` "already exists").
+    Any other error propagates.
     """
     from botocore.exceptions import ClientError
 
     try:
         return create_fn(**kwargs)
     except ClientError as e:
-        if e.response.get("Error", {}).get("Code") == "ConflictException":
+        err = e.response.get("Error", {})
+        # Most create_* calls return ConflictException for an existing resource;
+        # CreatePaymentCredentialProvider returns ValidationException "... already exists".
+        if err.get("Code") == "ConflictException" or (
+            err.get("Code") == "ValidationException" and "already exists" in err.get("Message", "")
+        ):
             print(f"  (skip) {conflict_msg}")
             return None
         raise

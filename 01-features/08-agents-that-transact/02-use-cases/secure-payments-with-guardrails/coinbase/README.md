@@ -170,12 +170,16 @@ This sample has been run end-to-end against the provisioned stack:
   raised exception.
 - **Session budget guardrail, re-run 2026-10-02** — same result
   (`InsufficientBudget`, budget untouched).
-- **CDP signing-layer policy** — `cdp_policy_payment_demo.py` runs a baseline
-  (no policy, must succeed), a negative step (decoy-only policy, must fail with a
-  policy error), and a positive control (merchant-allowed policy, must succeed).
-  An earlier version of the demo reported a CDP refusal that turned out to be a
-  lapsed delegation grant; the baseline step now catches that and stops. The
-  full three-step run is pending re-granted delegation in WalletHub.
+- **Happy path, re-run 2026-10-02** on a new wallet — paid 0.001 USDC, settlement
+  tx [`0x8c23cdadb1559d17e8598c9cc0ce0f47a0ab593dbca17ab4ef95ef3263d47936`](https://sepolia.basescan.org/tx/0x8c23cdadb1559d17e8598c9cc0ce0f47a0ab593dbca17ab4ef95ef3263d47936).
+- **CDP signing-layer policy, verified 2026-10-02** — `cdp_policy_payment_demo.py`
+  through AgentCore `ProcessPayment`: (0) no policy → payment header produced;
+  (1) decoy-only project policy → `AccessDeniedException — The request was
+  blocked by a policy configured in your Coinbase Developer Platform project`;
+  (2) merchant-allowed policy → payment header produced. Both policies were
+  deleted afterwards. An earlier version of the demo reported a CDP refusal that
+  turned out to be a lapsed delegation grant; the baseline step now catches that
+  and stops.
 - **Dogwood temporal policies** (`policies/dogwood/`) are validated and
   replay-tested locally with the `dogwood` 1.0 CLI against a copy of
   AgentCore's documented event schema: 10/10 scenarios pass. They have not yet

@@ -145,9 +145,21 @@ python setup/provision_payments.py
 
 **3 — Fund the wallet + grant delegated signing** (once): fund `WALLET_ADDRESS`
 at [faucet.circle.com](https://faucet.circle.com/) (Base Sepolia), then grant the
-agent delegated signing for the Privy embedded wallet via the delegation flow
-printed by setup (the Privy
-[AgentCore SDK frontend](https://github.com/privy-io/aws-agentcore-sdk)).
+agent delegated signing through the Privy
+[AgentCore SDK frontend](https://github.com/privy-io/aws-agentcore-sdk): set
+`NEXT_PUBLIC_PRIVY_APP_ID`, `NEXT_PUBLIC_PRIVY_SIGNER_ID` (= your authorization
+key ID), `PRIVY_APP_SECRET`, and `NEXT_PUBLIC_NETWORK_MODE=testnet` in
+`.env.local`, add the frontend's origin to the Privy app's allowed origins, log in
+as `LINKED_EMAIL`, and choose **Connect agent**.
+
+> **Attach the policy at this step.** The AgentCore wallet is owned by the end
+> user, so only the user can put a policy on the agent's signer. Run step 4's
+> `privy_policy_setup.py` first; it prints a policy ID. Then, in the frontend's
+> `src/components/modals/connect-agent-modal.tsx`, change
+> `signers: [{ signerId, policyIds: [] }]` to
+> `signers: [{ signerId, policyIds: ["<policy id>"] }]` before you click
+> **Connect agent**. If the agent was already connected without the policy,
+> remove the signer and add it again — re-adding an existing signer is a no-op.
 
 **4 — (Recommended) the Privy signing-layer policy** (recipient allowlist +
 per-tx cap + chain pin, fail-closed at signing). Creates a Privy condition set of
@@ -205,13 +217,24 @@ python agent/session_budget_demo.py     # live: over-budget payment refused serv
   replay-tested locally with the `dogwood` 1.0 CLI against a copy of
   AgentCore's documented event schema: 10/10 scenarios pass. They have not yet
   been deployed to a live AgentCore Gateway in this sample.
-- **Privy signing-layer policy** scripts are checked offline against Privy's
-  published OpenAPI contract (request shapes, request signing, wallet
-  ownership) and a model of Privy's documented policy semantics. They have not
-  yet run against a live Privy app. Run `privy_policy_probe.py` and
-  `privy_policy_payment_demo.py` on your own stack to confirm enforcement; the
-  probe shows directly whether the policy's typed-data `types` match what your
-  signer sends (see [`docs/SECURITY.md`](docs/SECURITY.md)).
+- **Verified live (2026-10-02, Base Sepolia):**
+  - *Happy path* — the agent paid **0.001 USDC** through AgentCore + the Privy
+    connector and received the content. Settlement tx
+    [`0x0a83c4c706422d24920b9b6421d650f8fc9f4728494a237b6e3e9a2b270d63d1`](https://sepolia.basescan.org/tx/0x0a83c4c706422d24920b9b6421d650f8fc9f4728494a237b6e3e9a2b270d63d1).
+  - *Privy policy* — `privy_policy_setup.py` created the two-rule policy, and
+    `privy_policy_probe.py` against a wallet carrying it passed all 10 cases:
+    allowed payments signed (both `types` shapes, both address casings); wrong
+    recipient, over-cap, and wrong chain were refused. With no policy on the
+    agent signer, Privy signed every case.
+  - *Exact `types` match* — a policy with only the no-`EIP712Domain` rule
+    refused an allowed payment sent with `EIP712Domain` (fail-closed); a `DENY`
+    rule on `to` without `EIP712Domain` let a payment to the denied address be
+    signed when the request carried `EIP712Domain` (fail-open).
+  - *Wallet ownership* — the AgentCore-created wallet is user-owned (`owner_id`
+    is the user), so the app cannot attach policies to it; the policy must be set
+    on the agent signer at delegation (see step 3).
+- **Not yet run live:** `privy_policy_payment_demo.py` through AgentCore with the
+  policy on the agent signer.
 
 ## Security notes
 

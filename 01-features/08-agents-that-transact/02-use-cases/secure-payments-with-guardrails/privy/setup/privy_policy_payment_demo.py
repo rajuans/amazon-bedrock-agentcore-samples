@@ -1,30 +1,31 @@
-"""Live proof — a Privy policy controls whether AgentCore `ProcessPayment` succeeds.
+"""Live proof — the Privy policy decides whether AgentCore `ProcessPayment` succeeds.
 
 This drives a *real* x402 payment through AgentCore Payments
 (`generate_payment_header` -> `ProcessPayment` -> the Privy connector signs the
-EIP-3009 typed data) in three steps, the Stripe/Privy analogue of the Coinbase
-CDP demo:
+EIP-3009 typed data), the Stripe/Privy analogue of the Coinbase CDP demo.
 
-  0. BASELINE — the wallet's policies removed. ProcessPayment must SUCCEED,
-     which proves that delegation, funding, and the session are in order.
-     Otherwise any later refusal could have an unrelated cause, so the demo stops.
-  1. NEGATIVE — a fail-closed policy that allows only a decoy recipient. The
-     merchant's `payTo` matches no ALLOW rule, so Privy refuses to sign and
-     ProcessPayment must FAIL with a policy error (any other error makes the
-     step inconclusive).
-  2. POSITIVE CONTROL — the same policy shape, allowing the real merchant.
-     ProcessPayment must SUCCEED. Without this step a policy that denies
-     everything (for example, because its typed-data `types` do not match what
-     the signer sends) would look like a working guardrail. This step produces a
-     signed payment header but never sends it to the merchant, so no USDC moves
-     (it does draw $0.001 from a throwaway session budget). POSITIVE_CONTROL=0
-     skips it.
+AgentCore wallets are user-owned, so the app cannot swap the wallet's policies.
+It does not need to: the policy created by `privy_policy_setup.py` screens the
+recipient against a condition set that the app owns, and changing a condition
+set changes the policy's behavior immediately. The demo therefore flips the
+condition set and checks each outcome:
 
-The wallet's original `policy_ids` are restored at the end.
+  0. ALLOWED  — the set holds the real merchant. ProcessPayment must SUCCEED.
+     This proves that delegation, funding, and the session are in order AND
+     that the policy's rules match what the signer sends (a policy whose
+     typed-data `types` never match would refuse this payment too).
+  1. NEGATIVE — the set holds only a decoy recipient. ProcessPayment must FAIL
+     with a policy error (any other error makes the step inconclusive).
+  2. ALLOWED  — the merchant again. ProcessPayment must SUCCEED again.
 
-Requires: the provisioned stack in .env (PAYMENT_MANAGER_ARN, INSTRUMENT_ID,
-PAYMENT_CONNECTOR_ID, WALLET_ADDRESS or PRIVY_WALLET_ID), a funded and delegated
-wallet, AWS creds, and Privy app credentials.
+The condition set's original contents are restored at the end. No payment
+header is sent to the merchant, so no USDC moves (each step draws $0.001 from a
+throwaway session budget).
+
+Requires: `privy_policy_setup.py` has run (PRIVY_POLICY_ID, PRIVY_CONDITION_SET_ID)
+and the policy governs the agent signer — attached to the wallet, or set as the
+signer's policy at delegation. Plus a funded, delegated wallet, AWS creds, and
+Privy app credentials.
 
     python setup/privy_policy_payment_demo.py
 """
@@ -40,18 +41,17 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 
 from dotenv import load_dotenv  # noqa: E402
 
-from utils import ENV_FILE, client_token, load_env  # noqa: E402
+from utils import ENV_FILE, client_token, load_env, require_env  # noqa: E402
 
 load_dotenv(ENV_FILE, override=True)
 
-from privy_client import PrivyClient, wallet_update_mode  # noqa: E402
-from privy_policy_setup import build_allowlist_rules, describe_wallet, resolve_wallet  # noqa: E402
+from privy_client import PrivyClient, governing_policy_ids  # noqa: E402
+from privy_policy_setup import describe_wallet, resolve_wallet  # noqa: E402
 
 from bedrock_agentcore.payments import PaymentManager  # noqa: E402
 
 PAID_ENDPOINT = os.environ.get("PAID_ENDPOINT", "https://x402-test.genesisblock.ai/api/weather")
 DECOY_RECIPIENT = os.environ.get("DECOY_RECIPIENT", "0x000000000000000000000000000000000000dEaD")
-POSITIVE_CONTROL = os.environ.get("POSITIVE_CONTROL", "1") != "0"
 
 
 def fetch_402() -> dict:
@@ -109,36 +109,39 @@ def main() -> int:
     c = load_env()
     mgr = PaymentManager(payment_manager_arn=c["payment_manager_arn"], region_name=c["region"])
     privy = PrivyClient.from_env()
+    auth_id = os.environ.get("PRIVY_AUTHORIZATION_ID", "").strip()
+    policy_id = require_env("PRIVY_POLICY_ID")
+    set_id = require_env("PRIVY_CONDITION_SET_ID")
+
     wallet = resolve_wallet(privy)
     describe_wallet(wallet)
-    signed, problem = wallet_update_mode(wallet, os.environ.get("PRIVY_AUTHORIZATION_ID", "").strip())
-    if problem:
-        raise SystemExit(f"Cannot run the demo: {problem}")
-    original = wallet.get("policy_ids") or []
+    governing = governing_policy_ids(wallet, auth_id)
+    if policy_id not in governing:
+        raise SystemExit(
+            f"Policy {policy_id} does not govern the agent signer (governing: {governing}). "
+            "Attach it first — see setup/privy_policy_setup.py.")
 
     merchant = merchant_pay_to(fetch_402())
-    created = []  # (policy_id, condition_set_id)
-
-    def use_policy(name, allowed):
-        set_id = privy.create_condition_set(name)
-        privy.add_condition_set_items(set_id, [allowed])
-        policy_id = privy.create_policy(name, build_allowlist_rules(set_id))
-        created.append((policy_id, set_id))
-        privy.update_wallet(wallet["id"], {"policy_ids": [policy_id]}, signed=signed)
-        print(f"\nAttached policy {policy_id}: allow `to` == {allowed}")
+    original = privy.get_condition_set_items(set_id)
+    print(f"\nPolicy {policy_id} governs the agent signer; recipient condition set {set_id} "
+          f"currently holds {original}")
 
     rc = 0
     try:
-        privy.update_wallet(wallet["id"], {"policy_ids": []}, signed=signed)
-        ok, _ = try_pay(mgr, c, f"0) BASELINE — pay merchant {merchant}; no Privy policy:")
+        privy.replace_condition_set_items(set_id, [merchant])
+        ok, err = try_pay(mgr, c, f"0) ALLOWED — condition set = merchant {merchant}:")
         if not ok:
-            print("  STOP: the payment fails even without a policy, so the policy steps would be "
-                  "inconclusive. Fix this first (delegation, funding, session).")
+            if is_policy_refusal(err):
+                print("  FAIL: the policy refused an allowed payment. Its typed-data `types` do not "
+                      "match what the signer sends — run setup/privy_policy_probe.py.")
+                return 1
+            print("  STOP: the payment fails for a reason other than the policy, so the policy "
+                  "steps would be inconclusive. Fix this first (delegation, funding, session).")
             return 2
-        print("  OK: delegation, funding, and session are in order.")
+        print("  OK: delegation, funding, and the policy's rules all check out for an allowed payment.")
 
-        use_policy("DEMO allow decoy only", DECOY_RECIPIENT)
-        ok, err = try_pay(mgr, c, f"1) NEGATIVE — pay merchant {merchant}; only the decoy is allowed:")
+        privy.replace_condition_set_items(set_id, [DECOY_RECIPIENT])
+        ok, err = try_pay(mgr, c, f"1) NEGATIVE — condition set = decoy {DECOY_RECIPIENT} only:")
         if ok:
             print("  FAIL: the policy did not block signing.")
             rc = 1
@@ -148,23 +151,17 @@ def main() -> int:
         else:
             print("  OK: Privy refused to sign, so ProcessPayment failed.")
 
-        if POSITIVE_CONTROL and rc == 0:
-            use_policy("DEMO allow merchant", merchant)
-            ok, _ = try_pay(mgr, c, f"2) POSITIVE CONTROL — pay merchant {merchant}; merchant allowed:")
+        if rc == 0:
+            privy.replace_condition_set_items(set_id, [merchant])
+            ok, _ = try_pay(mgr, c, f"2) ALLOWED AGAIN — condition set = merchant {merchant}:")
             if ok:
-                print("  OK: the same policy shape signs an allowed payment, so step 1 was a real "
-                      "policy decision, not a blanket deny.")
+                print("  OK: allowed again, so step 1 was the recipient rule, not a blanket deny.")
             else:
-                print("  FAIL: the allowed payment was refused too. The policy is denying every "
-                      "payment — check the typed-data `types` with setup/privy_policy_probe.py, "
-                      "and check funding and delegation.")
+                print("  FAIL: the allowed payment was refused after the negative step.")
                 rc = 1
     finally:
-        privy.update_wallet(wallet["id"], {"policy_ids": original}, signed=signed)
-        for policy_id, set_id in created:
-            privy.delete_policy(policy_id)
-            privy.delete_condition_set(set_id)
-        print(f"\nCleanup: restored policy_ids={original}; deleted {len(created)} demo policies.")
+        privy.replace_condition_set_items(set_id, original or [merchant])
+        print(f"\nCleanup: restored condition set {set_id} to {original or [merchant]}.")
 
     print("\n✅ Privy policy enforcement confirmed end to end." if rc == 0 else "\n❌ Demo failed.")
     return rc

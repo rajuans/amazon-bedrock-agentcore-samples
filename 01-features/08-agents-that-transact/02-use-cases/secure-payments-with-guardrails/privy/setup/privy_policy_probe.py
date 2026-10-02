@@ -24,7 +24,8 @@ funds move, and nothing goes through AgentCore.
 Requires: delegation completed (the authorization key is a signer on the
 wallet), PRIVY_* credentials in .env, and PRIVY_WALLET_ID or WALLET_ADDRESS.
 
-    python setup/privy_policy_probe.py
+    python setup/privy_policy_probe.py              # wallet from .env
+    python setup/privy_policy_probe.py <wallet_id>  # any wallet the key can sign for
 """
 
 import os
@@ -74,9 +75,9 @@ def attempt(privy, wallet, td):
         return f"ERROR {e.status}: {e.text[:160]}"
 
 
-def main() -> int:
+def main(wallet_id=None) -> int:
     privy = PrivyClient.from_env()
-    wallet = resolve_wallet(privy)
+    wallet = resolve_wallet(privy, wallet_id)
     addr = wallet["address"]
     merchant = RECIPIENT_ALLOWLIST[0]
     print(f"Wallet {wallet['id']} ({addr})  policy_ids={wallet.get('policy_ids') or []}")
@@ -108,4 +109,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1] if len(sys.argv) == 2 else None))
