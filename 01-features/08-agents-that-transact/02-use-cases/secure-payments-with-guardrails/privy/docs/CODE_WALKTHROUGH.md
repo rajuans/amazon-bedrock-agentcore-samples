@@ -180,13 +180,6 @@ frontend so **Connect agent** sets the sample's policy on the agent signer. See
 | `dogwood/test_dogwood_policies.py` | validates both policy files and checks every verdict (15 checks) |
 | `privy_allowlist_cap_policy.json` | the Privy policy `privy_policy_setup.py` creates, for reference |
 
-## `test_privy_payment_agent.ipynb`
-
-A notebook that runs the README steps cell by cell: install, check `.env`, confirm
-AWS identity, provision, create the wallet, poll until active, the offline demos,
-the Dogwood tests, the live demos, the Privy policy setup and probe, the agent,
-and cleanup.
-
 ## Data that moves where
 
 | Secret / ID | Lives in | Used by |

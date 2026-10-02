@@ -266,7 +266,6 @@ manager — see the cleanup section of the
 ├── docs/
 │   ├── SECURITY.md                 # threat model + the four layers
 │   └── CODE_WALKTHROUGH.md         # file-by-file walkthrough
-├── test_privy_payment_agent.ipynb  # notebook that runs the steps above
 ├── .env.privy.sample
 └── requirements.txt
 ```

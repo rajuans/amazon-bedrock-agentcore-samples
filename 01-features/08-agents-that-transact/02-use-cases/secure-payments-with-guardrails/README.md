@@ -29,8 +29,7 @@ Each folder is self-contained: a step-by-step `README.md` (with expected output,
 live verification results, and troubleshooting), `docs/CODE_WALKTHROUGH.md` (every
 file and function), `docs/SECURITY.md` (threat model), setup scripts, the agent,
 policy files with a local test suite, and a `.env.*.sample`. The `privy/` folder
-also includes `frontend-patch/` (attaches the Privy policy at delegation) and an
-end-to-end notebook (`test_privy_payment_agent.ipynb`).
+also includes `frontend-patch/` (attaches the Privy policy at delegation).
 
 Both samples were run end to end on Base Sepolia: the agent's paid purchase, the
 session budget, and the wallet-provider policy through AgentCore `ProcessPayment`
