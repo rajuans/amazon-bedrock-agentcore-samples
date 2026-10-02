@@ -3,11 +3,15 @@
 This is the integration story (not a standalone CDP sign call): we set up a CDP
 Policy Engine rule, then drive a *real* x402 payment through AgentCore Payments
 (`generate_payment_header` → `ProcessPayment` → the CDP connector signs the
-EIP-3009 typed data), under two policies:
+EIP-3009 typed data), in three steps:
 
+  0. BASELINE — no policy. ProcessPayment must SUCCEED, which proves that
+     delegation, funding, and the session are in order. Otherwise any later
+     refusal could have an unrelated cause, so the demo stops here.
   1. NEGATIVE — a project-scoped policy that allows only a **decoy** recipient
      (not the merchant `payTo`). The real payment's `to` matches no accept rule,
-     so the fail-secure engine refuses to sign and ProcessPayment must FAIL.
+     so the fail-secure engine refuses to sign and ProcessPayment must FAIL
+     with a policy error (any other error makes the step inconclusive).
   2. POSITIVE CONTROL — the same rule shape allowing the real merchant.
      ProcessPayment must SUCCEED. Without this step, a rule that never matches
      the signing request (and so denies everything) would look like a working
@@ -76,9 +80,9 @@ def _merchant_pay_to() -> str:
     return evm[0]["payTo"]
 
 
-def _try_pay(mgr, c, label) -> bool:
-    """Attempt to settle the 402 via AgentCore in a fresh session. True if a
-    payment header was produced, False if ProcessPayment was refused."""
+def _try_pay(mgr, c, label):
+    """Attempt to settle the 402 via AgentCore in a fresh session. Returns
+    (True, "") if a payment header was produced, else (False, error text)."""
     print(f"\n{label}")
     session = mgr.create_payment_session(
         user_id=c["user_id"],
@@ -97,10 +101,14 @@ def _try_pay(mgr, c, label) -> bool:
             payment_connector_id=c["payment_connector_id"],
         )
         print("  -> ProcessPayment produced a payment header.")
-        return True
+        return True, ""
     except Exception as e:  # noqa: BLE001 - surface the service's verbatim reason
         print(f"  -> ProcessPayment FAILED: {type(e).__name__}: {e}")
-        return False
+        return False, str(e)
+
+
+def _is_policy_refusal(err: str) -> bool:
+    return "policy" in err.lower()
 
 
 async def main() -> int:
@@ -128,7 +136,14 @@ async def main() -> int:
                 "conflict with it; remove or reuse it before running."
             )
 
-        async def run_with_policy(allowed, label) -> bool:
+        ok, err = _try_pay(mgr, c, f"0) BASELINE — pay merchant {merchant}; no CDP policy:")
+        if not ok:
+            print("  STOP: the payment fails even without a policy, so the policy steps would be "
+                  "inconclusive. Fix this first (delegated signing in WalletHub, funding, session).")
+            return 2
+        print("  OK: delegation, funding, and session are in order.")
+
+        async def run_with_policy(allowed, label):
             policy = await cdp.policies.create_policy(
                 policy=CreatePolicyOptions(
                     scope="project",
@@ -145,16 +160,21 @@ async def main() -> int:
                 print(f"  Cleanup: deleted project policy {policy.id}")
 
         rc = 0
-        if await run_with_policy(DECOY_RECIPIENT,
-                                 f"1) NEGATIVE — pay merchant {merchant}; only the decoy is allowed:"):
+        ok, err = await run_with_policy(DECOY_RECIPIENT,
+                                        f"1) NEGATIVE — pay merchant {merchant}; only the decoy is allowed:")
+        if ok:
             print("  FAIL: the policy did not block signing.")
+            rc = 1
+        elif not _is_policy_refusal(err):
+            print("  FAIL (inconclusive): ProcessPayment failed, but not with a policy error.")
             rc = 1
         else:
             print("  OK: the CDP Policy Engine refused to sign, so ProcessPayment failed.")
 
         if POSITIVE_CONTROL and rc == 0:
-            if await run_with_policy(merchant,
-                                     f"2) POSITIVE CONTROL — pay merchant {merchant}; merchant allowed:"):
+            ok, _ = await run_with_policy(merchant,
+                                          f"2) POSITIVE CONTROL — pay merchant {merchant}; merchant allowed:")
+            if ok:
                 print("  OK: the same rule shape signs an allowed payment, so step 1 was a real "
                       "policy decision, not a blanket deny.")
             else:

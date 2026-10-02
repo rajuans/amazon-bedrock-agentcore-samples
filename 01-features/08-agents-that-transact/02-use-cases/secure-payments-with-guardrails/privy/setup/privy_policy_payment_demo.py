@@ -2,12 +2,16 @@
 
 This drives a *real* x402 payment through AgentCore Payments
 (`generate_payment_header` -> `ProcessPayment` -> the Privy connector signs the
-EIP-3009 typed data) under two Privy policies, the Stripe/Privy analogue of the
-Coinbase CDP demo:
+EIP-3009 typed data) in three steps, the Stripe/Privy analogue of the Coinbase
+CDP demo:
 
+  0. BASELINE — the wallet's policies removed. ProcessPayment must SUCCEED,
+     which proves that delegation, funding, and the session are in order.
+     Otherwise any later refusal could have an unrelated cause, so the demo stops.
   1. NEGATIVE — a fail-closed policy that allows only a decoy recipient. The
      merchant's `payTo` matches no ALLOW rule, so Privy refuses to sign and
-     ProcessPayment must FAIL.
+     ProcessPayment must FAIL with a policy error (any other error makes the
+     step inconclusive).
   2. POSITIVE CONTROL — the same policy shape, allowing the real merchant.
      ProcessPayment must SUCCEED. Without this step a policy that denies
      everything (for example, because its typed-data `types` do not match what
@@ -70,9 +74,9 @@ def merchant_pay_to(challenge) -> str:
     return evm[0]["payTo"]
 
 
-def try_pay(mgr, c, label) -> bool:
-    """Attempt to settle the 402 via AgentCore in a fresh session. True if a
-    payment header was produced, False if ProcessPayment was refused."""
+def try_pay(mgr, c, label):
+    """Attempt to settle the 402 via AgentCore in a fresh session. Returns
+    (True, "") if a payment header was produced, else (False, error text)."""
     print(f"\n{label}")
     session = mgr.create_payment_session(
         user_id=c["user_id"],
@@ -91,10 +95,14 @@ def try_pay(mgr, c, label) -> bool:
             payment_connector_id=c["payment_connector_id"],
         )
         print("  -> ProcessPayment produced a payment header.")
-        return True
+        return True, ""
     except Exception as e:  # noqa: BLE001 - surface the service's verbatim reason
         print(f"  -> ProcessPayment FAILED: {type(e).__name__}: {e}")
-        return False
+        return False, str(e)
+
+
+def is_policy_refusal(err: str) -> bool:
+    return "policy" in err.lower()
 
 
 def main() -> int:
@@ -121,16 +129,29 @@ def main() -> int:
 
     rc = 0
     try:
+        privy.update_wallet(wallet["id"], {"policy_ids": []}, signed=signed)
+        ok, _ = try_pay(mgr, c, f"0) BASELINE — pay merchant {merchant}; no Privy policy:")
+        if not ok:
+            print("  STOP: the payment fails even without a policy, so the policy steps would be "
+                  "inconclusive. Fix this first (delegation, funding, session).")
+            return 2
+        print("  OK: delegation, funding, and session are in order.")
+
         use_policy("DEMO allow decoy only", DECOY_RECIPIENT)
-        if try_pay(mgr, c, f"1) NEGATIVE — pay merchant {merchant}; only the decoy is allowed:"):
+        ok, err = try_pay(mgr, c, f"1) NEGATIVE — pay merchant {merchant}; only the decoy is allowed:")
+        if ok:
             print("  FAIL: the policy did not block signing.")
+            rc = 1
+        elif not is_policy_refusal(err):
+            print("  FAIL (inconclusive): ProcessPayment failed, but not with a policy error.")
             rc = 1
         else:
             print("  OK: Privy refused to sign, so ProcessPayment failed.")
 
         if POSITIVE_CONTROL and rc == 0:
             use_policy("DEMO allow merchant", merchant)
-            if try_pay(mgr, c, f"2) POSITIVE CONTROL — pay merchant {merchant}; merchant allowed:"):
+            ok, _ = try_pay(mgr, c, f"2) POSITIVE CONTROL — pay merchant {merchant}; merchant allowed:")
+            if ok:
                 print("  OK: the same policy shape signs an allowed payment, so step 1 was a real "
                       "policy decision, not a blanket deny.")
             else:

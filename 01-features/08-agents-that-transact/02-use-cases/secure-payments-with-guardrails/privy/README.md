@@ -166,9 +166,11 @@ python setup/privy_policy_setup.py
 # (validBefore = 1), so no signature can move funds.
 python setup/privy_policy_probe.py
 
-# Prove it end to end through AgentCore: a decoy-only policy makes ProcessPayment
-# fail, and a merchant-allowed policy makes it succeed (positive control).
-# Restores the wallet's original policies afterwards.
+# Prove it end to end through AgentCore, in three steps: (0) with no policy the
+# payment must succeed — this checks delegation and funding first; (1) with a
+# decoy-only policy ProcessPayment must fail with a policy error; (2) with a
+# merchant-allowed policy it must succeed again (positive control). Restores the
+# wallet's original policies afterwards; no payment header is sent, so no USDC moves.
 python setup/privy_policy_payment_demo.py
 
 # Remove the policy after testing:

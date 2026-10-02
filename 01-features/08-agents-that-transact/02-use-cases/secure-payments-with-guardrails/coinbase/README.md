@@ -125,10 +125,12 @@ signing is governed by a **project-scoped** policy; CDP *server* accounts use an
 account-scoped policy attached with `cdp_policy_setup.py`.
 
 ```bash
-# Prove it end to end through AgentCore: a decoy-only project policy makes
-# ProcessPayment fail, and a merchant-allowed policy makes it succeed (positive
-# control — shows the rule really matches, rather than denying everything).
-# Each policy is deleted afterwards:
+# Prove it end to end through AgentCore, in three steps: (0) with no policy the
+# payment must succeed — this checks delegation and funding first; (1) with a
+# decoy-only project policy ProcessPayment must fail with a policy error; (2) with
+# a merchant-allowed policy it must succeed again (positive control — shows the
+# rule really matches, rather than denying everything). Each policy is deleted
+# afterwards; no payment header is sent, so no USDC moves:
 python setup/cdp_policy_payment_demo.py
 
 # Server-account variant (attach/detach an account-scoped policy):
@@ -166,11 +168,14 @@ This sample has been run end-to-end against the provisioned stack:
   `InsufficientBudget` (`Pending amount: 0.0001 USD, Transaction amount: 0.001000 USD`);
   the budget was never touched. No LLM narration involved — the rejection is the
   raised exception.
-- **CDP signing-layer policy** — `cdp_policy_payment_demo.py` now runs a negative
-  step (decoy-only policy, ProcessPayment must fail) **and** a positive control
-  (merchant-allowed policy, ProcessPayment must succeed). The updated demo is
-  checked offline; run it against your stack to confirm the rule matches the
-  signing request rather than denying everything.
+- **Session budget guardrail, re-run 2026-10-02** — same result
+  (`InsufficientBudget`, budget untouched).
+- **CDP signing-layer policy** — `cdp_policy_payment_demo.py` runs a baseline
+  (no policy, must succeed), a negative step (decoy-only policy, must fail with a
+  policy error), and a positive control (merchant-allowed policy, must succeed).
+  An earlier version of the demo reported a CDP refusal that turned out to be a
+  lapsed delegation grant; the baseline step now catches that and stops. The
+  full three-step run is pending re-granted delegation in WalletHub.
 - **Dogwood temporal policies** (`policies/dogwood/`) are validated and
   replay-tested locally with the `dogwood` 1.0 CLI against a copy of
   AgentCore's documented event schema: 10/10 scenarios pass. They have not yet
